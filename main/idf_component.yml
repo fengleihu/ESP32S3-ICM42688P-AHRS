@@ -1,0 +1,6 @@
+## 组件依赖声明。
+## managed_components/ 里已经放了离线副本（espressif__bmm350 / i2c_bus / cmake_utilities），
+## 因此无网络也能直接编译；若删掉 managed_components/，idf.py 会按下面的声明自动重新下载。
+dependencies:
+  idf: ">=5.3"
+  espressif/bmm350: "^1.1.0"

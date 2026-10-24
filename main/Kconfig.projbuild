@@ -1,0 +1,282 @@
+menu "OLED 独立测试"
+
+    menu "屏类型 / 总线"
+
+        choice APP_OLED_BUS
+            prompt "这块屏接在哪种总线上"
+            default APP_OLED_BUS_SPI
+            help
+                4 针（VCC/GND/SCL/SDA）的小屏走 I2C；7 针（含 CS/DC/RES）的走 SPI。
+                I2C 只有 4 根线，没有 CS/DC/RES 这三根最容易接错、也最容易搞出
+                "能亮但画面全乱"的控制线。
+
+            config APP_OLED_BUS_SPI
+                bool "SPI（7 针：VCC GND CLK MOSI RES DC CS）"
+
+            config APP_OLED_BUS_I2C
+                bool "I2C（4 针：VCC GND SCL SDA）"
+        endchoice
+
+        choice APP_OLED_HEIGHT
+            prompt "屏的有效高度（像素行数）"
+            default APP_OLED_HO_64
+            help
+                0.96 寸是 128x64，0.91 寸是 128x32。写错不会烧屏，
+                但画面会上下重复或只剩一半。分辨不出时先按尺寸选：
+                0.96 寸 -> 64；0.91/0.93 寸 -> 32。
+
+            config APP_OLED_HO_64
+                bool "64 行（0.96 寸 128x64）"
+
+            config APP_OLED_HO_32
+                bool "32 行（0.91 寸 128x32）"
+        endchoice
+
+    endmenu
+
+    menu "接线（按丝印逐个对应，别按位置猜）"
+
+        config APP_OLED_MOSI_GPIO
+            int "MOSI / D1  -> GPIO"
+            default 17
+
+        config APP_OLED_CLK_GPIO
+            int "CLK / D0   -> GPIO"
+            default 18
+
+        config APP_OLED_CS_GPIO
+            int "CS          -> GPIO"
+            default 14
+
+        config APP_OLED_DC_GPIO
+            int "DC          -> GPIO"
+            default 15
+
+        config APP_OLED_RST_GPIO
+            int "RES / RST   -> GPIO"
+            default 16
+
+        config APP_OLED_I2C_SDA_GPIO
+            int "I2C SDA     -> GPIO"
+            default 1
+            depends on APP_OLED_BUS_I2C
+            help
+                与 AHRS 工程的 I2C 一致（SDA=1, SCL=2）。0.91 寸屏的地址通常是 0x3C，
+                和 MPU6050 的 0x68 不冲突，所以可以挂在同一条总线上。
+
+        config APP_OLED_I2C_SCL_GPIO
+            int "I2C SCL     -> GPIO"
+            default 2
+            depends on APP_OLED_BUS_I2C
+
+        config APP_OLED_I2C_HZ
+            int "I2C 时钟 (Hz)"
+            default 400000
+            depends on APP_OLED_BUS_I2C
+            help
+                SSD1306 的 I2C 上限 400kHz。杜邦线长/不稳时先降到 100000。
+
+        config APP_OLED_I2C_ADDR
+            int "I2C 地址 (0x3C=60, 0x3D=61)"
+            range 0 127
+            default 60
+            depends on APP_OLED_BUS_I2C
+            help
+                常见是 0x3C(60)。启动时会自动扫描 0x3C 和 0x3D，
+                哪个应答就用哪个，所以这里填错也能自己纠正。
+
+        config APP_OLED_SPI_HZ
+            int "SPI 时钟 (Hz)"
+            default 1000000
+            help
+                SSD1306 上限 10MHz。杜邦线长、或排查阶段先用 1MHz，
+                确认画面正常后再往上加（4MHz 通常没问题）。
+
+        config APP_OLED_SPI_MODE
+            int "SPI 模式 (0 或 3)"
+            range 0 3
+            default 0
+            help
+                SSD1306 标准是模式 0（空闲低、上升沿采样）。少数模块/长线下
+                模式 3（空闲高）更稳，画面错乱时可以试试 3。
+
+        config APP_OLED_DC_SETUP_US
+            int "DC 切换后的建立时间 (微秒)"
+            range 0 1000
+            default 0
+            help
+                DC 线长、或模块上有电容时，DC 切换后立刻发时钟可能有个别字节
+                被当成命令，表现为"部分区域乱码"。若怀疑此问题，设成 10 试试。
+
+    endmenu
+
+    menu "显示参数"
+
+        config APP_OLED_CONTRAST
+            int "对比度 (0~255)"
+            range 0 255
+            default 207
+
+        config APP_OLED_SH1106
+            bool "这块屏是 SH1106（不是 SSD1306）"
+            default n
+            help
+                典型症状：画面整体右移约 2 像素、右边被切掉一列。
+                SH1106 不支持 SSD1306 的窗口寻址命令，必须按页写且列从 2 开始。
+
+        config APP_OLED_MIRROR_X
+            bool "左右镜像（画面左右反了）"
+            default n
+            help
+                对应 SSD1306 的段重映射。屏幕上的"左半屏全亮"图案如果亮在右边，
+                就是这个反了。
+
+        config APP_OLED_MIRROR_Y
+            bool "上下镜像（画面上下颠倒）"
+            default n
+            help
+                对应 COM 扫描方向。屏幕整个倒过来就是它。两个都打开 = 旋转 180°。
+
+        config APP_OLED_PAGE_BITFLIP
+            bool "页内位序反转"
+            default n
+            help
+                SSD1306 标准：一个字节的 bit0 = 该页最上面一行。
+                若文字被"横向切成 8 行一条条翻转"、地面花纹跑到线的另一侧，
+                就是这个位序反了，打开此项即可，不用改接线。
+
+        config APP_OLED_COM_PINS_ALT
+            bool "COM 引脚配置用 0x12（128x32 画面上下重复时才开）"
+            default n
+            help
+                标准值：128x64 用 0xDA 0x12，128x32 用 0xDA 0x02
+                （Adafruit 和 esp-idf-ssd1306 都是这么分的）。
+                但网上有实测反映：部分 SSD1306/SSD1315 屏上 A[4] 的实际表现
+                与手册相反。症状是 128x32 的屏画面上下各重复一次、或只显示半屏，
+                这时把本项打开（改成 0x12）往往就好了。
+                写错不损坏屏，只是画面不对，可以放心试。
+
+    endmenu
+
+    menu "测试流程"
+
+        config APP_OLED_PHASE_MS
+            int "每个图案持续 (ms)"
+            range 500 10000
+            default 2500
+
+        config APP_OLED_LOOP
+            bool "一直循环播放（方便随时拍照）"
+            default y
+
+        config APP_OLED_HOLD
+            bool "停在某一张图案上（拍照用）"
+            default n
+            help
+                打开后：先按顺序画到指定的那张图，然后一直停在它上面不换。
+                手机对焦/摆位不用赶时间，拍出来的照片可以直接和串口 ASCII 逐像素比对。
+                拍完想继续看循环：关掉此项重新烧录，或把"定格时长"设成正数。
+
+        config APP_OLED_HOLD_INDEX
+            int "定格第几张 (1~9)"
+            range 1 9
+            default 2
+            depends on APP_OLED_HOLD
+            help
+                默认 2 = "正中单点"。这一张是判别数据通路好坏的关键：
+                屏上只有一个点 -> 通路 OK，问题在映射；
+                屏上是一堆点   -> 通路不可靠（丢位/失步）。
+                8 = "整屏全亮"自检：连全亮都做不到，问题就在写入通路而不在数据内容。
+
+        config APP_OLED_HOLD_MS
+            int "定格时长 (ms，0 = 一直停住)"
+            range 0 3600000
+            default 0
+            depends on APP_OLED_HOLD
+            help
+                0 = 永久停住，直到断电/复位。设成正数（如 20000）就停 20 秒后继续循环。
+
+        config APP_OLED_LOG_ASCII
+            bool "把每一帧用 ASCII 打进串口日志"
+            default y
+            help
+                每换一个图案，就在串口打印这张图"应该长什么样"（64×16 字符的缩略图）。
+                拍下屏幕照片 + 贴出对应日志，就能远程判断是丢位、偏移还是映射问题。
+
+        config APP_OLED_LOG_FULL
+            bool "打印整帧逐像素 ASCII（128 宽，一行 = 一个像素行）"
+            default n
+            help
+                最硬的判据：串口里出现一张 128×64 的字符图，屏幕上的每个像素在这里
+                都有一个对应字符。照片和它一比，丢位/偏移/镜像/失步全都藏不住。
+                代价：一帧约 8.6 KB 文本，115200 波特率下要 3~4 秒才打完。
+
+        config APP_OLED_LOG_FB_HEX
+            bool "打印整帧显存 hex（1024 字节）"
+            default n
+            help
+                把 RAM 里真正准备写进屏的那 1024 字节原样打出来，便于和照片做
+                逐位比对，也能直接喂给脚本做位序/映射分析。约 3 KB 文本。
+
+        config APP_OLED_LOG_COLUMN_RULER
+            bool "整帧 ASCII 前面加列标尺（每 10 像素一个数字）"
+            default y
+            depends on APP_OLED_LOG_FULL
+            help
+                方便肉眼读出"第几个像素"的位置，标尺本身不代表屏幕内容。
+
+    endmenu
+
+endmenu
+menu "磁力计 BMM350（9 轴融合用）"
+
+    config APP_MAG_ENABLE
+        bool "启用 BMM350 磁力计（把 yaw 锁到磁北，消掉 6 轴的漂移）"
+        default y
+        help
+            BMM350 挂在同一条 I2C 总线上（地址 0x14 或 0x15），与屏和 MPU6050 并联。
+            没有磁力计时 yaw 在数学上不可观测，6 轴必然漂移（实测约 53°/分钟）；
+            有了磁力计并校准后，yaw 会被磁北锁住。
+
+    config APP_MAG_I2C_ADDR
+        hex "BMM350 7 位地址"
+        default 0x14
+        depends on APP_MAG_ENABLE
+        help
+            ADSEL 接 GND 是 0x14，接 VDD 是 0x15。启动时会两个都探，填错也能自己纠正。
+
+    config APP_MAG_CAL_SECONDS
+        int "磁力计校准时长（秒）"
+        range 5 60
+        default 15
+        depends on APP_MAG_ENABLE
+        help
+            首次使用（NVS 里没有校准数据）时，启动后会要求你把设备绕各轴慢慢转几圈。
+            时间太短转不完，圈数不够会让校准质量差。15 秒通常够。
+
+    config APP_MAG_FORCE_RECAL
+        bool "强制重新校准（忽略并清除 NVS 里已有的校准）"
+        default n
+        depends on APP_MAG_ENABLE
+        help
+            换了设备位置、附近有磁性物体、或怀疑校准数据不对时打开一次，
+            重新编译烧录后启动就会重新校准；校准完记得改回 n。
+
+    config APP_MAG_AXIS_PERM
+        int "磁力计轴向映射（XYZ 的排列方式）"
+        range 0 5
+        default 0
+        depends on APP_MAG_ENABLE
+        help
+            0=XYZ 1=XZY 2=YXZ 3=YZX 4=ZXY 5=ZYX。
+            BMM350 与 MPU6050 是两颗独立芯片，丝印方向可能不一致。
+            轴向映射错的表现是"yaw 一开始对、一倾斜就错"，因为磁场的水平分量
+            被投影到了竖直轴上。不确定时先用默认 0。
+
+    config APP_MAG_AXIS_INV
+        int "磁力计各轴取反（bit0=X bit1=Y bit2=Z）"
+        range 0 7
+        default 0
+        depends on APP_MAG_ENABLE
+
+endmenu

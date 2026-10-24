@@ -1,0 +1,917 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <title>ESP32-S3 姿态上位机</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: #0b1020;
+      color: #edf2ff;
+      font-synthesis: none;
+      --panel: #131b2e;
+      --panel-border: #25324c;
+      --muted: #91a0bb;
+      --cyan: #67e8f9;
+      --green: #4ade80;
+      --amber: #fbbf24;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      background:
+        radial-gradient(ellipse at 15% 0%, #152545 0, transparent 42%),
+        radial-gradient(ellipse at 100% 30%, #102a34 0, transparent 33%),
+        #0b1020;
+    }
+
+    button, select { font: inherit; }
+
+    .app { width: min(1440px, 100%); margin: 0 auto; padding: 24px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 13px; }
+    .brand-mark {
+      display: grid; place-items: center; width: 46px; height: 46px; border-radius: 14px;
+      color: #07121d; background: linear-gradient(145deg, #67e8f9, #60a5fa);
+      font-weight: 900; letter-spacing: -2px;
+    }
+    h1 { margin: 0; font-size: clamp(19px, 3vw, 26px); letter-spacing: .01em; }
+    .subtitle { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .controls { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 9px; }
+
+    .button, select {
+      height: 40px; border-radius: 10px; border: 1px solid var(--panel-border);
+      background: #18233a; color: #e8efff; padding: 0 13px;
+    }
+    .button { cursor: pointer; transition: transform .15s ease, background .15s ease; }
+    .button:hover:not(:disabled) { transform: translateY(-1px); background: #223250; }
+    .button:disabled { opacity: .45; cursor: not-allowed; }
+    .button.primary { border-color: #47cae4; color: #07151e; background: linear-gradient(120deg, #67e8f9, #60a5fa); font-weight: 750; }
+    .button.primary:hover:not(:disabled) { background: #9af2ff; }
+    select { min-width: 112px; }
+
+    .status {
+      display: inline-flex; align-items: center; gap: 8px; min-height: 36px;
+      padding: 0 12px; border: 1px solid var(--panel-border); border-radius: 999px;
+      background: #111a2c; color: var(--muted); font-size: 12px; white-space: nowrap;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 99px; background: #64748b; box-shadow: 0 0 0 4px #64748b22; }
+    .status.connected { color: #bbf7d0; border-color: #22593c; }
+    .status.connected .dot { background: var(--green); box-shadow: 0 0 0 4px #4ade8022; }
+    .status.error { color: #fecaca; border-color: #783c45; }
+    .status.error .dot { background: #fb7185; box-shadow: 0 0 0 4px #fb718522; }
+
+    .grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(330px, .8fr); gap: 18px; }
+    .panel {
+      border: 1px solid var(--panel-border); border-radius: 18px;
+      background: linear-gradient(150deg, #151f34ee, #101729f5);
+      box-shadow: 0 14px 40px #00000020;
+    }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px 0; }
+    .panel-title { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: .02em; }
+    .eyebrow { color: var(--muted); font-size: 11px; }
+
+    .attitude-panel { min-height: 420px; overflow: hidden; }
+    .model-stage {
+      position: relative; display: grid; place-items: center; min-height: 365px;
+      margin: 8px 14px 0; border-radius: 14px; overflow: hidden;
+      background:
+        linear-gradient(#26365122 1px, transparent 1px),
+        linear-gradient(90deg, #26365122 1px, transparent 1px),
+        radial-gradient(ellipse at 50% 55%, #1a3550, #11192a 72%);
+      background-size: 32px 32px, 32px 32px, auto;
+    }
+    #attitudeCanvas { width: 100%; height: 365px; display: block; }
+    .model-legend {
+      position: absolute; left: 15px; bottom: 13px; display: flex; gap: 13px;
+      padding: 8px 10px; border: 1px solid #34415c; border-radius: 9px;
+      background: #0a1120aa; color: #a9b7ce; font-size: 11px; backdrop-filter: blur(8px);
+    }
+    .legend-key { display: inline-flex; align-items: center; gap: 5px; }
+    .legend-line { width: 12px; height: 3px; border-radius: 4px; }
+    .model-note { position: absolute; top: 13px; left: 15px; color: #8494af; font-size: 11px; }
+    .declination-control {
+      position: absolute; z-index: 1; top: 9px; right: 10px; display: flex; align-items: center;
+      gap: 6px; padding: 6px 8px; border: 1px solid #34415c; border-radius: 9px;
+      background: #0a1120cc; color: #c4d0e3; font-size: 10px; backdrop-filter: blur(8px);
+    }
+    .declination-control input {
+      width: 62px; height: 28px; padding: 0 5px; border: 1px solid #40506d;
+      border-radius: 6px; background: #18233a; color: #edf2ff; font: inherit;
+      font-size: 11px; font-variant-numeric: tabular-nums;
+    }
+
+    .side-column { display: grid; grid-template-rows: auto auto 1fr; gap: 18px; }
+    .angles-panel { padding-bottom: 16px; }
+    .angle-grid { display: grid; gap: 9px; padding: 14px 16px 0; }
+    .angle-card {
+      display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 7px 14px;
+      padding: 12px 14px; border: 1px solid #26334d; border-radius: 13px;
+      background: #0d1526aa;
+    }
+    .angle-name { color: #aab8cf; font-size: 12px; }
+    .angle-value { font-variant-numeric: tabular-nums; font-size: clamp(25px, 3.2vw, 34px); font-weight: 700; letter-spacing: -.04em; }
+    .angle-unit { margin-left: 4px; color: #8a9ab6; font-size: 13px; font-weight: 500; }
+    .angle-bar { grid-column: 1 / -1; height: 4px; border-radius: 99px; background: #27344b; overflow: hidden; }
+    .angle-bar > i { display: block; height: 100%; width: 50%; border-radius: inherit; background: linear-gradient(90deg, #4f8cf7, #67e8f9); transition: width .15s ease; }
+    [data-angle="roll"] .angle-value { color: #7dd3fc; }
+    [data-angle="pitch"] .angle-value { color: #a5b4fc; }
+    [data-angle="yaw"] .angle-value { color: #67e8f9; }
+
+    .compass-panel { padding-bottom: 16px; }
+    .compass-layout { display: flex; align-items: center; gap: 18px; padding: 14px 18px 0; }
+    .compass {
+      position: relative; flex: 0 0 102px; width: 102px; height: 102px; border-radius: 50%;
+      border: 1px solid #40506d; background: radial-gradient(circle, #192840 0 58%, #0d1626 59%);
+      box-shadow: inset 0 0 18px #0005;
+    }
+    .compass::before { content: ""; position: absolute; inset: 8px; border: 1px dashed #42516b; border-radius: 50%; }
+    .compass-rose { position: absolute; inset: 0; transition: transform .18s ease-out; }
+    .compass-mark { position: absolute; left: 50%; top: 9px; transform: translateX(-50%); color: #fb7185; font-weight: 800; font-size: 13px; }
+    .compass-mark.south { top: auto; bottom: 9px; color: #93a4bd; }
+    .compass-mark.east { left: auto; right: 12px; top: 50%; transform: translateY(-50%); color: #93a4bd; }
+    .compass-mark.west { left: 12px; top: 50%; transform: translateY(-50%); color: #93a4bd; }
+    .compass-needle { position: absolute; left: 50%; top: 23px; width: 2px; height: 29px; transform: translateX(-50%); background: linear-gradient(#fb7185 0 48%, #7790b4 50%); border-radius: 3px; }
+    .compass-center { position: absolute; left: calc(50% - 4px); top: calc(50% - 4px); width: 8px; height: 8px; border-radius: 50%; background: #edf2ff; box-shadow: 0 0 10px #67e8f9; }
+    .heading-copy { min-width: 0; }
+    .heading-number { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .heading-label { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+
+    .health-panel { padding-bottom: 15px; }
+    .health-list { display: grid; gap: 10px; padding: 14px 18px 0; }
+    .health-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #aab8cf; font-size: 12px; }
+    .health-value { display: inline-flex; align-items: center; gap: 7px; color: #e6edfb; }
+    .health-value::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #65748b; }
+    .health-value.good::before { background: var(--green); }
+    .health-value.warn::before { background: var(--amber); }
+    .health-value.bad::before { background: #fb7185; }
+
+    .chart-panel { grid-column: 1 / -1; min-height: 245px; padding-bottom: 12px; }
+    .chart-wrap { height: 190px; padding: 10px 14px 0; }
+    #historyCanvas { display: block; width: 100%; height: 180px; }
+    .chart-legend { display: flex; justify-content: flex-end; gap: 14px; padding-right: 18px; color: #9aa9c0; font-size: 11px; }
+    .chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .chart-dot { width: 7px; height: 7px; border-radius: 50%; }
+
+    .capture-panel { grid-column: 1 / -1; padding-bottom: 16px; }
+    .capture-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 14px 18px 10px; }
+    .capture-help { flex: 1 1 250px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .capture-state { padding: 0 18px 10px; color: var(--cyan); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .capture-table-wrap { overflow-x: auto; padding: 0 18px; }
+    .capture-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .capture-table th, .capture-table td { padding: 8px 10px; border-bottom: 1px solid #26334d; text-align: right; }
+    .capture-table th { color: #91a0bb; font-weight: 600; }
+    .capture-table th:first-child, .capture-table td:first-child { text-align: left; }
+    .capture-table td { color: #e6edfb; }
+
+    .notice {
+      margin-top: 16px; padding: 12px 15px; border: 1px solid #34415c; border-radius: 12px;
+      color: #aab8cf; background: #111a2b99; font-size: 12px; line-height: 1.6;
+    }
+    .notice strong { color: #e4edff; }
+    .notice.error { border-color: #783c45; color: #fecaca; }
+    .footer { margin: 14px 2px 0; display: flex; justify-content: space-between; gap: 10px; color: #697995; font-size: 10px; }
+
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: minmax(0, 1fr); }
+      .side-column { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
+      .angles-panel { grid-row: span 2; }
+      .chart-panel { grid-column: auto; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .controls { justify-content: flex-start; }
+    }
+    @media (max-width: 580px) {
+      .app { padding: 15px; }
+      .side-column { grid-template-columns: 1fr; }
+      .angles-panel { grid-row: auto; }
+      .model-stage { min-height: 300px; margin-inline: 8px; }
+      #attitudeCanvas { height: 300px; }
+      .model-note { top: auto; bottom: 48px; }
+      .model-legend { left: 10px; bottom: 9px; max-width: calc(100% - 20px); flex-wrap: wrap; gap: 7px 10px; }
+      .declination-control { right: 8px; }
+      .controls { width: 100%; }
+      .status { order: -1; }
+      .footer { flex-direction: column; }
+      .compass-layout { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">9A</div>
+        <div>
+          <h1>姿态监视器</h1>
+          <div class="subtitle">ESP32-S3 · MPU6050 · BMM350</div>
+        </div>
+      </div>
+      <div class="controls">
+        <div id="connectionStatus" class="status"><span class="dot"></span><span id="statusText">未连接</span></div>
+        <select id="baudRate" aria-label="串口波特率">
+          <option value="115200" selected>115200 baud</option>
+          <option value="230400">230400 baud</option>
+          <option value="460800">460800 baud</option>
+          <option value="921600">921600 baud</option>
+        </select>
+        <button id="recalibrateMagButton" class="button" disabled>请求磁力计重校准</button>
+        <button id="connectButton" class="button primary">连接串口</button>
+        <button id="disconnectButton" class="button" disabled>断开</button>
+      </div>
+    </header>
+
+    <section class="grid" aria-label="姿态监控面板">
+      <article class="panel attitude-panel">
+        <div class="panel-head">
+          <h2 class="panel-title">实时三维姿态</h2>
+          <span class="eyebrow">元件面视图 · +X 前 / +Y 左 / +Z 上</span>
+        </div>
+        <div class="model-stage">
+          <span class="model-note">绿色板面表示传感器朝向</span>
+          <label class="declination-control" for="declinationInput">
+            磁偏角 东+
+            <input id="declinationInput" type="number" min="-180" max="180" step="0.1" value="0" aria-label="当地磁偏角，东偏为正，西偏为负" title="东偏为正，西偏为负；输入当地磁偏角">
+            °
+          </label>
+          <canvas id="attitudeCanvas" aria-label="实时三维姿态模型"></canvas>
+          <div class="model-legend">
+            <span class="legend-key"><i class="legend-line" style="background:#fb7185"></i>+X 前</span>
+            <span class="legend-key"><i class="legend-line" style="background:#67e8f9"></i>+Y 左</span>
+            <span class="legend-key"><i class="legend-line" style="background:#4ade80"></i>+Z 上</span>
+            <span class="legend-key"><i class="legend-line" style="background:#fbbf24"></i>地理北</span>
+            <span class="legend-key"><i class="legend-line" style="background:#c084fc"></i>磁北</span>
+          </div>
+        </div>
+      </article>
+
+      <div class="side-column">
+        <article class="panel angles-panel">
+          <div class="panel-head">
+            <h2 class="panel-title">欧拉角</h2>
+            <span class="eyebrow">单位：度</span>
+          </div>
+          <div class="angle-grid">
+            <div class="angle-card" data-angle="roll">
+              <span class="angle-name">ROLL · 横滚</span><span class="angle-value"><b id="rollValue">—</b><i class="angle-unit">°</i></span>
+              <div class="angle-bar"><i id="rollBar"></i></div>
+            </div>
+            <div class="angle-card" data-angle="pitch">
+              <span class="angle-name">PITCH · 俯仰</span><span class="angle-value"><b id="pitchValue">—</b><i class="angle-unit">°</i></span>
+              <div class="angle-bar"><i id="pitchBar"></i></div>
+            </div>
+            <div class="angle-card" data-angle="yaw">
+              <span class="angle-name">YAW · 航向</span><span class="angle-value"><b id="yawValue">—</b><i class="angle-unit">°</i></span>
+              <div class="angle-bar"><i id="yawBar"></i></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel compass-panel">
+          <div class="panel-head"><h2 class="panel-title">航向罗盘</h2><span class="eyebrow">磁北参考</span></div>
+          <div class="compass-layout">
+            <div class="compass" aria-hidden="true">
+              <div id="compassRose" class="compass-rose">
+                <span class="compass-mark">N</span><span class="compass-mark south">S</span>
+                <span class="compass-mark east">E</span><span class="compass-mark west">W</span>
+              </div>
+              <i class="compass-needle"></i><i class="compass-center"></i>
+            </div>
+            <div class="heading-copy">
+              <div class="heading-number"><span id="headingValue">—</span><span class="angle-unit">°</span></div>
+              <div class="heading-label">Yaw 相对磁北；未应用当地磁偏角。</div>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel health-panel">
+          <div class="panel-head"><h2 class="panel-title">传感器状态</h2><span class="eyebrow">来自 ATT 数据帧</span></div>
+          <div class="health-list">
+            <div class="health-row"><span>磁力计</span><span id="magStatus" class="health-value">等待数据</span></div>
+            <div class="health-row"><span>磁校准</span><span id="calStatus" class="health-value">等待数据</span></div>
+            <div class="health-row"><span>数据更新</span><span id="freshStatus" class="health-value">—</span></div>
+            <div class="health-row"><span>接收帧数</span><span id="frameCount" class="health-value">0</span></div>
+          </div>
+        </article>
+      </div>
+
+      <article class="panel chart-panel">
+        <div class="panel-head">
+          <h2 class="panel-title">姿态趋势</h2>
+          <span id="chartRange" class="eyebrow">最近 60 秒</span>
+        </div>
+        <div class="chart-wrap"><canvas id="historyCanvas" aria-label="Roll、Pitch、Yaw 历史曲线"></canvas></div>
+        <div class="chart-legend">
+          <span><i class="chart-dot" style="background:#7dd3fc"></i>Roll</span>
+          <span><i class="chart-dot" style="background:#a5b4fc"></i>Pitch</span>
+          <span><i class="chart-dot" style="background:#67e8f9"></i>Yaw</span>
+        </div>
+      </article>
+
+      <article class="panel capture-panel">
+        <div class="panel-head">
+          <h2 class="panel-title">Yaw 收敛计时</h2>
+          <span class="eyebrow">停止转动后自动记录</span>
+        </div>
+        <div class="capture-toolbar">
+          <button id="markStopButton" class="button primary" disabled>标记停止并开始计时</button>
+          <button id="copyCaptureButton" class="button" disabled>复制记录</button>
+          <span class="capture-help">转动并停稳后立刻点击；自动抓取停止后首帧、1 秒、3 秒和 5 秒的 ATT 数据。</span>
+        </div>
+        <div id="captureState" class="capture-state" aria-live="polite">连接串口并收到姿态数据后即可开始。</div>
+        <div class="capture-table-wrap">
+          <table class="capture-table">
+            <thead>
+              <tr><th>目标时间</th><th>实际时间</th><th>设备时间 ms</th><th>Roll °</th><th>Pitch °</th><th>Yaw °</th><th>磁航向 °</th></tr>
+            </thead>
+            <tbody id="captureRows"><tr><td colspan="7">尚无计时记录</td></tr></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
+    <div id="notice" class="notice">
+      <strong>连接提示：</strong>请使用最新版 Chrome 或 Edge，通过 localhost 打开本页面，再点击“连接串口”选择开发板对应的 USB 串口。串口被其他监视器占用时请先关闭它。
+    </div>
+    <footer class="footer">
+      <span>浏览器直接读取 USB 串口，不上传数据，不依赖云服务。</span>
+      <span id="lastUpdate">尚未收到姿态数据</span>
+    </footer>
+  </main>
+
+  <script>
+    "use strict";
+
+    const ATT_FIELDS = {
+      timestamp: 1, roll: 2, pitch: 3, yaw: 4, magPresent: 5, magCalibrated: 6,
+      accelX: 7, accelY: 8, accelZ: 9, magFresh: 10, headingValid: 11, heading: 12,
+      calMagX: 13, calMagY: 14, calMagZ: 15, rawMagX: 16, rawMagY: 17, rawMagZ: 18
+    };
+    const HISTORY_MS = 60000;
+    const HISTORY_MAX = 900;
+    const DECLINATION_STORAGE_KEY = "esp32s3-ahrs-magnetic-declination";
+    const history = [];
+    let port = null;
+    let reader = null;
+    let readTask = null;
+    let shouldRead = false;
+    let frameTotal = 0;
+    let latest = null;
+    let stopMarkAt = null;
+    let nextCaptureIndex = 0;
+    let captureRows = [];
+    let magneticDeclinationDeg = 0;
+    const captureTargets = [0, 1000, 3000, 5000];
+
+    const $ = (id) => document.getElementById(id);
+    const statusPill = $("connectionStatus");
+    const notice = $("notice");
+
+    function setConnection(state, text) {
+      statusPill.className = `status${state ? ` ${state}` : ""}`;
+      $("statusText").textContent = text;
+    }
+
+    function showNotice(message, isError = false) {
+      notice.classList.toggle("error", isError);
+      notice.innerHTML = isError
+        ? `<strong>连接提示：</strong>${escapeHtml(message)}`
+        : `<strong>连接提示：</strong>${escapeHtml(message)}`;
+    }
+
+    function initializeDeclination() {
+      const input = $("declinationInput");
+      try {
+        const saved = localStorage.getItem(DECLINATION_STORAGE_KEY);
+        if (saved !== null && Number.isFinite(Number(saved)) &&
+            Number(saved) >= -180 && Number(saved) <= 180) {
+          magneticDeclinationDeg = Number(saved);
+        }
+      } catch (error) {
+        showNotice(`无法读取已保存的磁偏角设置：${error.message || error}`, true);
+      }
+      input.value = magneticDeclinationDeg.toFixed(1);
+    }
+
+    function updateDeclination() {
+      const input = $("declinationInput");
+      const value = Number(input.value);
+      if (!input.value.trim() || !Number.isFinite(value) || value < -180 || value > 180) {
+        input.setCustomValidity("请输入 -180° 到 +180° 之间的当地磁偏角。");
+        input.reportValidity();
+        input.value = magneticDeclinationDeg.toFixed(1);
+        input.setCustomValidity("");
+        return;
+      }
+      input.setCustomValidity("");
+      magneticDeclinationDeg = value;
+      try {
+        localStorage.setItem(DECLINATION_STORAGE_KEY, String(value));
+      } catch (error) {
+        showNotice(`磁偏角已应用，但无法保存设置：${error.message || error}`, true);
+      }
+      drawAttitude();
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      })[char]);
+    }
+
+    function parseAttLine(line) {
+      const fields = line.trim().split(",");
+      if (fields.length < 11 || fields[0] !== "ATT") return null;
+      const values = fields.slice(1).map(Number);
+      if (values.slice(0, 10).some((value) => !Number.isFinite(value))) return null;
+      const get = (name) => values[ATT_FIELDS[name] - 1];
+      return {
+        timestamp: get("timestamp"),
+        roll: get("roll"),
+        pitch: get("pitch"),
+        yaw: get("yaw"),
+        magPresent: get("magPresent") === 1,
+        magCalibrated: get("magCalibrated") === 1,
+        accel: [get("accelX"), get("accelY"), get("accelZ")],
+        magFresh: get("magFresh") === 1,
+        headingValid: Number.isFinite(get("headingValid")) && get("headingValid") === 1,
+        heading: get("heading"),
+        calMag: [get("calMagX"), get("calMagY"), get("calMagZ")],
+        rawMag: [get("rawMagX"), get("rawMagY"), get("rawMagZ")],
+        receivedAt: performance.now()
+      };
+    }
+
+    function receiveLine(line) {
+      if (line.trim() === "CMD_READY,RECAL_MAG") {
+        $("recalibrateMagButton").disabled = false;
+        return;
+      }
+      const data = parseAttLine(line);
+      if (!data) return;
+      data.rawLine = line.trim();
+      latest = data;
+      frameTotal += 1;
+      history.push(data);
+      const cutoff = data.receivedAt - HISTORY_MS;
+      while (history.length && (history[0].receivedAt < cutoff || history.length > HISTORY_MAX)) {
+        history.shift();
+      }
+      captureAfterStop(data);
+      renderData(data);
+    }
+
+    function captureAfterStop(data) {
+      if (stopMarkAt === null) return;
+      const elapsed = data.receivedAt - stopMarkAt;
+      while (nextCaptureIndex < captureTargets.length &&
+             elapsed >= captureTargets[nextCaptureIndex]) {
+        captureRows.push({
+          targetMs: captureTargets[nextCaptureIndex],
+          actualMs: elapsed,
+          data
+        });
+        nextCaptureIndex += 1;
+      }
+      renderCaptureRows();
+      if (nextCaptureIndex >= captureTargets.length) {
+        $("captureState").textContent = "计时完成。可复制表格数据发送分析。";
+        stopMarkAt = null;
+      } else {
+        const nextSeconds = captureTargets[nextCaptureIndex] / 1000;
+        $("captureState").textContent = `已记录 ${captureRows.length}/${captureTargets.length} 项 · 等待 +${nextSeconds} 秒`;
+      }
+    }
+
+    function renderCaptureRows() {
+      const tbody = $("captureRows");
+      if (!captureRows.length) {
+        tbody.innerHTML = '<tr><td colspan="7">尚无计时记录</td></tr>';
+        $("copyCaptureButton").disabled = true;
+        return;
+      }
+      tbody.innerHTML = captureRows.map(({ targetMs, actualMs, data }) => `
+        <tr>
+          <td>+${(targetMs / 1000).toFixed(targetMs ? 0 : 1)} s</td>
+          <td>${(actualMs / 1000).toFixed(2)} s</td>
+          <td>${Math.round(data.timestamp)}</td>
+          <td>${formatAngle(data.roll)}</td>
+          <td>${formatAngle(data.pitch)}</td>
+          <td>${formatAngle(data.yaw)}</td>
+          <td>${data.headingValid && Number.isFinite(data.heading) ? formatAngle(data.heading) : "—"}</td>
+        </tr>`).join("");
+      $("copyCaptureButton").disabled = false;
+    }
+
+    function markStopAndStartTimer() {
+      if (!latest) return;
+      stopMarkAt = performance.now();
+      nextCaptureIndex = 0;
+      captureRows = [];
+      renderCaptureRows();
+      $("captureState").textContent = "已标记停止时刻，正在等待下一帧 ATT…";
+    }
+
+    async function copyCaptureRows() {
+      if (!captureRows.length) return;
+      const header = "target_s,actual_s,device_uptime_ms,roll_deg,pitch_deg,yaw_deg,mag_heading_deg";
+      const lines = captureRows.map(({ targetMs, actualMs, data }) => [
+        (targetMs / 1000).toFixed(1),
+        (actualMs / 1000).toFixed(2),
+        Math.round(data.timestamp),
+        data.roll.toFixed(2),
+        data.pitch.toFixed(2),
+        data.yaw.toFixed(2),
+        data.headingValid && Number.isFinite(data.heading) ? data.heading.toFixed(2) : ""
+      ].join(","));
+      try {
+        await navigator.clipboard.writeText([header, ...lines].join("\n"));
+        $("captureState").textContent = "计时记录已复制到剪贴板。";
+      } catch (error) {
+        $("captureState").textContent = `复制失败：${error.message || error}`;
+      }
+    }
+
+    function formatAngle(value) {
+      const normalized = ((value + 180) % 360 + 360) % 360 - 180;
+      return `${normalized >= 0 ? "+" : ""}${normalized.toFixed(1)}`;
+    }
+
+    function updateAngle(name, value, range) {
+      $(`${name}Value`).textContent = formatAngle(value);
+      const clamped = Math.max(-range, Math.min(range, value));
+      const width = 50 + clamped / range * 50;
+      $(`${name}Bar`).style.width = `${Math.max(0, Math.min(100, width))}%`;
+    }
+
+    function setHealth(id, text, state) {
+      const element = $(id);
+      element.textContent = text;
+      element.className = `health-value${state ? ` ${state}` : ""}`;
+    }
+
+    function renderData(data) {
+      updateAngle("roll", data.roll, 90);
+      updateAngle("pitch", data.pitch, 90);
+      updateAngle("yaw", data.yaw, 180);
+      $("headingValue").textContent = formatAngle(data.yaw);
+      $("compassRose").style.transform = `rotate(${data.yaw}deg)`;
+      $("frameCount").textContent = frameTotal.toLocaleString();
+      $("markStopButton").disabled = false;
+      setHealth("magStatus", data.magPresent ? "在线" : "未检测到", data.magPresent ? "good" : "bad");
+      setHealth("calStatus", data.magCalibrated ? "已校准" : "未校准 / 六轴", data.magCalibrated ? "good" : "warn");
+      setHealth("freshStatus", data.magFresh ? "新磁数据" : "等待下一次", data.magFresh ? "good" : "");
+      $("lastUpdate").textContent = `固件时间 ${Math.round(data.timestamp).toLocaleString()} ms · 本机接收 ${new Date().toLocaleTimeString()}`;
+      drawAttitude();
+      drawHistory();
+    }
+
+    async function connectSerial() {
+      if (!("serial" in navigator)) {
+        setConnection("error", "浏览器不支持 Web Serial");
+        showNotice("请使用最新版 Chrome 或 Edge，并通过 localhost 或 HTTPS 打开页面。", true);
+        return;
+      }
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({
+          baudRate: Number($("baudRate").value),
+          dataBits: 8,
+          stopBits: 1,
+          parity: "none",
+          flowControl: "none"
+        });
+        shouldRead = true;
+        $("connectButton").disabled = true;
+        $("disconnectButton").disabled = false;
+        $("recalibrateMagButton").disabled = true;
+        $("baudRate").disabled = true;
+        setConnection("connected", "串口已连接 · 等待固件就绪");
+        showNotice("已连接串口，等待固件发送 CMD_READY,RECAL_MAG 后启用重校准按钮。");
+        readTask = readSerialLoop();
+      } catch (error) {
+        port = null;
+        if (error.name === "NotFoundError") return;
+        setConnection("error", "连接失败");
+        showNotice(`无法打开串口：${error.message || error}`, true);
+      }
+    }
+
+    async function readSerialLoop() {
+      const decoder = new TextDecoder();
+      let pending = "";
+      try {
+        while (shouldRead && port?.readable) {
+          reader = port.readable.getReader();
+          try {
+            while (shouldRead) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              pending += decoder.decode(value, { stream: true });
+              let newline;
+              while ((newline = pending.indexOf("\n")) >= 0) {
+                const line = pending.slice(0, newline).replace(/\r$/, "");
+                pending = pending.slice(newline + 1);
+                receiveLine(line);
+              }
+              if (pending.length > 4096) pending = pending.slice(-1024);
+            }
+          } finally {
+            reader.releaseLock();
+            reader = null;
+          }
+          if (shouldRead) await new Promise((resolve) => setTimeout(resolve, 80));
+        }
+      } catch (error) {
+        if (shouldRead) {
+          setConnection("error", "串口读取中断");
+          showNotice(`串口读取失败：${error.message || error}`, true);
+        }
+      } finally {
+        shouldRead = false;
+        if (port) {
+          try { await port.close(); } catch { /* Port may already be disconnected. */ }
+        }
+        port = null;
+        reader = null;
+        $("connectButton").disabled = false;
+        $("disconnectButton").disabled = true;
+        $("recalibrateMagButton").disabled = true;
+        $("baudRate").disabled = false;
+        if (!statusPill.classList.contains("error")) setConnection("", "未连接");
+      }
+    }
+
+    async function disconnectSerial() {
+      shouldRead = false;
+      if (reader) {
+        try { await reader.cancel(); } catch { /* The stream may already be closed. */ }
+      }
+      if (readTask) await readTask;
+      readTask = null;
+    }
+
+    async function requestMagnetometerRecalibration() {
+      if (!port?.writable) {
+        showNotice("串口当前不可写，请重新连接开发板后再请求校准。", true);
+        return;
+      }
+      const confirmed = window.confirm(
+        "这会请求开发板重启，并清除磁力计的旧校准数据后重新校准。" +
+        "请先将手机、电脑、磁铁和金属物移远；启动后按提示保持静止校准陀螺，再缓慢转动板子约 15 秒。继续吗？"
+      );
+      if (!confirmed) return;
+
+      const button = $("recalibrateMagButton");
+      button.disabled = true;
+      let writer;
+      try {
+        writer = port.writable.getWriter();
+        await writer.write(new TextEncoder().encode("RECAL_MAG\n"));
+        showNotice("已发送重校准请求。开发板将重启；请观察串口日志，并在出现磁力计校准提示后缓慢转动设备约 15 秒。");
+      } catch (error) {
+        showNotice(`重校准请求发送失败：${error.message || error}`, true);
+        button.disabled = false;
+      } finally {
+        writer?.releaseLock();
+      }
+    }
+
+    function rotatePoint(point, roll, pitch, yaw) {
+      const cr = Math.cos(roll), sr = Math.sin(roll);
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const cy = Math.cos(yaw), sy = Math.sin(yaw);
+      const x1 = point[0];
+      const y1 = cr * point[1] - sr * point[2];
+      const z1 = sr * point[1] + cr * point[2];
+      const x2 = cp * x1 + sp * z1;
+      const y2 = y1;
+      const z2 = -sp * x1 + cp * z1;
+      return [cy * x2 - sy * y2, sy * x2 + cy * y2, z2];
+    }
+
+    function normalize(vector) {
+      const length = Math.hypot(...vector) || 1;
+      return vector.map((value) => value / length);
+    }
+
+    function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+    function cross(a, b) {
+      return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    }
+
+    function drawArrow(ctx, from, to, color, label) {
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const angle = Math.atan2(dy, dx);
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(to.x, to.y);
+      ctx.lineTo(to.x - 9 * Math.cos(angle - .42), to.y - 9 * Math.sin(angle - .42));
+      ctx.lineTo(to.x - 9 * Math.cos(angle + .42), to.y - 9 * Math.sin(angle + .42));
+      ctx.closePath();
+      ctx.fill();
+      ctx.font = "700 12px Segoe UI, sans-serif";
+      ctx.fillText(label, to.x + 7, to.y - 7);
+    }
+
+    function drawAttitude() {
+      const canvas = $("attitudeCanvas");
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * ratio);
+      canvas.height = Math.round(rect.height * ratio);
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
+      const center = { x: rect.width * .52, y: rect.height * .55 };
+      const scale = Math.min(rect.width, rect.height) * .34;
+      const roll = (latest?.roll || 0) * Math.PI / 180;
+      const pitch = (latest?.pitch || 0) * Math.PI / 180;
+      const yaw = (latest?.yaw || 0) * Math.PI / 180;
+      const camera = normalize([3.8, -5.3, 4.6]);
+      const right = normalize(cross([0, 0, 1], camera));
+      const up = normalize(cross(camera, right));
+
+      const project = (point) => {
+        const rotated = rotatePoint(point, roll, pitch, yaw);
+        const depth = dot(rotated, camera);
+        return {
+          x: center.x + dot(rotated, right) * scale,
+          y: center.y - dot(rotated, up) * scale,
+          depth
+        };
+      };
+
+      const board = [
+        [-.8, -.72, -.09], [.8, -.72, -.09], [.8, .72, -.09], [-.8, .72, -.09],
+        [-.8, -.72, .09], [.8, -.72, .09], [.8, .72, .09], [-.8, .72, .09]
+      ].map(project);
+      const faces = [
+        { ids: [0, 1, 2, 3], color: "#18354a" },
+        { ids: [0, 1, 5, 4], color: "#245a4f" },
+        { ids: [1, 2, 6, 5], color: "#1f6a57" },
+        { ids: [2, 3, 7, 6], color: "#1b514d" },
+        { ids: [3, 0, 4, 7], color: "#19463f" },
+        { ids: [4, 5, 6, 7], color: "#237a60" }
+      ];
+      faces.sort((a, b) => {
+        const depth = (face) => face.ids.reduce((sum, index) => sum + board[index].depth, 0) / face.ids.length;
+        return depth(b) - depth(a);
+      });
+
+      ctx.save();
+      ctx.shadowColor = "#0009";
+      ctx.shadowBlur = 24;
+      ctx.shadowOffsetY = 12;
+      for (const face of faces) {
+        ctx.beginPath();
+        face.ids.forEach((index, i) => i ? ctx.lineTo(board[index].x, board[index].y) : ctx.moveTo(board[index].x, board[index].y));
+        ctx.closePath();
+        ctx.fillStyle = face.color;
+        ctx.fill();
+        ctx.strokeStyle = "#9cebd377";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      const centerBoard = project([0, 0, .1]);
+      const xAxis = project([1.05, 0, .13]);
+      const yAxis = project([0, 1.02, .13]);
+      const zAxis = project([0, 0, .9]);
+      drawArrow(ctx, centerBoard, xAxis, "#fb7185", "+X");
+      drawArrow(ctx, centerBoard, yAxis, "#67e8f9", "+Y");
+      drawArrow(ctx, centerBoard, zAxis, "#4ade80", "+Z");
+
+      const front = project([.48, 0, .105]);
+      ctx.fillStyle = "#f4fff8";
+      ctx.beginPath();
+      ctx.arc(front.x, front.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#e7fff3";
+      ctx.font = "600 11px Segoe UI, sans-serif";
+      ctx.fillText("前", front.x + 8, front.y + 4);
+
+      const northOrigin = { x: rect.width - 48, y: 75 };
+      const screenDirection = (vector) => normalize([
+        dot(vector, right),
+        -dot(vector, up)
+      ]);
+      const magneticNorth = screenDirection([1, 0, 0]);
+      const declination = magneticDeclinationDeg * Math.PI / 180;
+      const geographicNorth = screenDirection([Math.cos(declination), Math.sin(declination), 0]);
+      const arrowEnd = (direction) => ({
+        x: northOrigin.x + direction[0] * 24,
+        y: northOrigin.y + direction[1] * 24
+      });
+      ctx.save();
+      ctx.fillStyle = "#0a1120bb";
+      ctx.fillRect(rect.width - 96, 43, 92, 76);
+      if (Math.abs(magneticDeclinationDeg) < 0.05) {
+        drawArrow(ctx, northOrigin, arrowEnd(geographicNorth), "#fbbf24", "");
+        ctx.fillStyle = "#fbbf24";
+        ctx.font = "700 10px Segoe UI, sans-serif";
+        ctx.fillText("地理北 = 磁北", rect.width - 89, 111);
+      } else {
+        drawArrow(ctx, northOrigin, arrowEnd(geographicNorth), "#fbbf24", "");
+        drawArrow(ctx, northOrigin, arrowEnd(magneticNorth), "#c084fc", "");
+        ctx.font = "700 10px Segoe UI, sans-serif";
+        ctx.fillStyle = "#fbbf24";
+        ctx.fillText("地理北", rect.width - 89, 106);
+        ctx.fillStyle = "#c084fc";
+        ctx.fillText("磁北", rect.width - 89, 117);
+      }
+      ctx.restore();
+    }
+
+    function drawHistory() {
+      const canvas = $("historyCanvas");
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * ratio);
+      canvas.height = Math.round(rect.height * ratio);
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      const width = rect.width, height = rect.height;
+      ctx.clearRect(0, 0, width, height);
+      const pad = { left: 37, right: 10, top: 10, bottom: 20 };
+      const graphW = width - pad.left - pad.right;
+      const graphH = height - pad.top - pad.bottom;
+      const min = -180, max = 180;
+
+      ctx.font = "10px Segoe UI, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      for (let degree = -180; degree <= 180; degree += 90) {
+        const y = pad.top + (max - degree) / (max - min) * graphH;
+        ctx.strokeStyle = "#2b3850";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(width - pad.right, y);
+        ctx.stroke();
+        ctx.fillStyle = "#74839b";
+        ctx.fillText(`${degree}°`, pad.left - 7, y);
+      }
+
+      if (history.length < 2) return;
+      const start = history[0].receivedAt;
+      const span = Math.max(1, history[history.length - 1].receivedAt - start);
+      const series = [
+        { key: "roll", color: "#7dd3fc" },
+        { key: "pitch", color: "#a5b4fc" },
+        { key: "yaw", color: "#67e8f9" }
+      ];
+      for (const item of series) {
+        ctx.strokeStyle = item.color;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        history.forEach((sample, index) => {
+          const x = pad.left + (sample.receivedAt - start) / span * graphW;
+          const value = ((sample[item.key] + 180) % 360 + 360) % 360 - 180;
+          const y = pad.top + (max - value) / (max - min) * graphH;
+          if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+    }
+
+    $("connectButton").addEventListener("click", connectSerial);
+    $("disconnectButton").addEventListener("click", disconnectSerial);
+    $("recalibrateMagButton").addEventListener("click", requestMagnetometerRecalibration);
+    $("markStopButton").addEventListener("click", markStopAndStartTimer);
+    $("copyCaptureButton").addEventListener("click", copyCaptureRows);
+    $("declinationInput").addEventListener("change", updateDeclination);
+    $("baudRate").addEventListener("change", () => {});
+    window.addEventListener("resize", () => { drawAttitude(); drawHistory(); });
+    if ("serial" in navigator) {
+      navigator.serial.addEventListener("disconnect", () => {
+        shouldRead = false;
+        setConnection("error", "设备已断开");
+        showNotice("USB 串口设备已断开。重新连接后请再次选择设备。", true);
+      });
+    } else {
+      setConnection("error", "需使用 Chrome / Edge");
+    }
+    initializeDeclination();
+    drawAttitude();
+    drawHistory();
+  </script>
+</body>
+</html>

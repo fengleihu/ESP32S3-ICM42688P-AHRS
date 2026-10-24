@@ -1,0 +1,14 @@
+dependencies:
+  espressif/i2c_bus:
+    public: true
+    version: ^1.5.0
+  idf: '>=5.3'
+description: I2C driver for BMM350 magnetometer
+documentation: https://docs.espressif.com/projects/esp-iot-solution/zh_CN/latest/sensors/magnetometer.html
+issues: https://github.com/espressif/esp-iot-solution/issues
+repository: git://github.com/espressif/esp-iot-solution.git
+repository_info:
+  commit_sha: ee4719d17032261777f929bbaf1808817f269b61
+  path: components/sensors/magnetometer/bmm350
+url: https://github.com/espressif/esp-iot-solution/tree/master/components/sensors/magnetometer/bmm350
+version: 1.1.0

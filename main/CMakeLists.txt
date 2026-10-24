@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "att_i2c_bus.c"
+        "mag.c"
+        "mag_axis.c"
+        "icm42688p.c"
+        "ahrs.c"
+        "ssd1306.c"
+        "ssd1306_i2c.c"
+        "ssd1306_dispatch.c"
+        "oled_ui.c"
+        "oled_font.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_timer
+        nvs_flash
+        bmm350
+        i2c_bus
+)
