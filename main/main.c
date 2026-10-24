@@ -31,6 +31,8 @@ static const char *TAG = "att9axis";
 #define MAG_AXIS_DETECT_SECONDS 20
 #define DEG_TO_RAD 0.017453292519943295f
 #define MAG_RECAL_COMMAND "RECAL_MAG"
+#define MARK_COMMAND "MARK"
+#define CMD_BUF_SIZE 64
 
 typedef struct {
     float roll;
@@ -200,8 +202,10 @@ static void calibrate_magnetometer(void)
     if (state.mag_calibrated) {
         mag_cal_t cal;
         mag_cal_get(&cal);
-        ESP_LOGI(TAG, "Mag calibration OK: samples=%d quality=%.2f radius=%.1f uT",
-                 reads, cal.quality, cal.radius);
+        ESP_LOGI(TAG, "Mag calibration OK: samples=%d method=%s quality=%.2f "
+                      "radius=%.1f uT residual=%.2f%%",
+                 reads, mag_cal_method_name(cal.method), cal.quality, cal.radius,
+                 100.0f * cal.residual);
     } else {
         ESP_LOGE(TAG, "Mag calibration failed after %d reads; continuing in 6-axis mode",
                  reads);
@@ -292,15 +296,36 @@ static void request_mag_recalibration(void)
     esp_restart();
 }
 
+/*
+ * MARK <label>：在串口日志里插一条 MARK,<ms>,<label>。
+ *
+ * 为什么需要：四项判据（静态 / 倾斜 30° / 180° 转身）都是"一段时间里做某件事"，
+ * 靠人工数时间点对不齐。打点之后 tools/att_report.py 能自动切段，测量结果
+ * 不依赖"我记得大概是第 20 秒开始倾的"。
+ */
+static void handle_mark(const char *line)
+{
+    const char *label = line + strlen(MARK_COMMAND);
+    while (*label == ' ' || *label == '\t') {
+        label++;
+    }
+    if (*label == '\0') {
+        label = "mark";
+    }
+    printf("MARK,%lld,%s\n", (long long)(esp_timer_get_time() / 1000), label);
+}
+
 static void serial_command_task(void *arg)
 {
     (void)arg;
-    char command[sizeof(MAG_RECAL_COMMAND)];
+    char command[CMD_BUF_SIZE];
     size_t length = 0;
     bool overflow = false;
 
-    ESP_LOGI(TAG, "Serial command enabled: send %s followed by newline to recalibrate BMM350",
+    ESP_LOGI(TAG, "Serial command enabled: %s = recalibrate BMM350, "
+                  "MARK <label> = mark a test segment",
              MAG_RECAL_COMMAND);
+    /* 这一行必须保持原样：pc_viewer 用它判断"命令通道就绪"（精确比较） */
     printf("CMD_READY,%s\n", MAG_RECAL_COMMAND);
     for (;;) {
         int ch = getchar();
@@ -316,8 +341,14 @@ static void serial_command_task(void *arg)
             if (length > 0) {
                 ESP_LOGI(TAG, "serial command received: %s", command);
             }
-            if (!overflow && strcmp(command, MAG_RECAL_COMMAND) == 0) {
+            if (overflow) {
+                /* 超长命令：不匹配，但已经记过日志了 */
+            } else if (strcmp(command, MAG_RECAL_COMMAND) == 0) {
                 request_mag_recalibration();
+            } else if (strncmp(command, MARK_COMMAND, strlen(MARK_COMMAND)) == 0 &&
+                       (command[sizeof(MARK_COMMAND) - 1] == '\0' ||
+                        command[sizeof(MARK_COMMAND) - 1] == ' ')) {
+                handle_mark(command);
             }
             length = 0;
             overflow = false;

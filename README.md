@@ -2,9 +2,9 @@
 
 Standalone ESP-IDF 5.5.1 project for an ESP32-S3 with **ICM-42688-P**, BMM350 and a
 0.91 inch 128x32 I2C SSD1306 OLED. It is a port of the verified MPU6050 project
-(`../ESP32S3-9Axis-AHRS`): the AHRS, magnetometer, display and serial format are
-unchanged; only the IMU driver, its mounting transform and the project name were
-replaced.
+(`../ESP32S3-9Axis-AHRS`): the AHRS, display and serial format are unchanged; the IMU
+driver, its mounting transform, the project name and the magnetometer calibration
+method (now an ellipsoid fit) were replaced.
 
 The fusion method is explained in [ATTITUDE-FUSION.md](./ATTITUDE-FUSION.md); current
 work notes and open items are in [HANDOFF.md](./HANDOFF.md).
@@ -58,8 +58,32 @@ namespace `att9axis`, so a fresh axis detection should NOT run. What does need c
 4. Tilt 30 degrees: yaw should move less than a couple of degrees.
 5. Edge-aligned 180 degree turn: yaw should change 180 +- 5 degrees.
 
+Steps 3-5 are automated: `tools/att_report.py record` / `analyze` finds the steady
+plateaus in a recording and prints PASS/FAIL with the measured numbers (see
+[HANDOFF.md](./HANDOFF.md#four-criteria-measurement-still-to-run-on-hardware)).
+
 If pitch/roll signs are inverted or swapped, fix `imu_to_body()` (currently a no-op)
 rather than touching the AHRS math.
+
+## Magnetometer calibration
+
+`mag_cal_process()` fits an **ellipsoid** to the samples collected during the 15 s
+rotation (`main/mag_fit.c`): hard-iron offset plus a full 3x3 soft-iron matrix, so
+cross-axis coupling is modelled too. If the fit is rejected (too few samples, a
+degenerate/partial rotation, an implausible result) the firmware falls back to the old
+min-max method and logs a warning. Sample coverage is checked independently by the
+min/max span ratio (`quality`, gate 0.4); a fit on a partial rotation can look perfect
+while the centre is tens of uT off.
+
+Typical log lines:
+
+```
+I (1234) mag: 校准完成（椭球拟合）：样本 375（拟合 372，剔除 3） offset=[24.6, -39.8, 11.9] µT 半径=57.4 µT 残差=1.20% 覆盖度=0.88
+I (1300) att9axis: Mag calibration OK: samples=375 method=椭球拟合 quality=0.88 radius=57.4 uT residual=1.20%
+```
+
+An existing `MAG1` (min-max) NVS blob is converted on load so an upgrade does not
+clear the calibration, but the boot log recommends running `RECAL_MAG` once.
 
 ## Request magnetometer recalibration
 
@@ -69,6 +93,21 @@ Type `RECAL_MAG` (or use the viewer button) and the firmware stores a one-shot r
 restarts, clears only the magnetic calibration, and asks for the 15-second rotation.
 `CONFIG_APP_MAG_FORCE_RECAL` remains available as a build-time override. Application logs
 now go to the USB console only; UART0 no longer prints application logs.
+
+`MARK <label>` prints `MARK,<ms>,<label>` immediately, which is how the analysis tool
+segments a measurement session. The command buffer is 64 bytes, so labels are not
+truncated.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `tools/att_report.py record` | captures the serial log (`--port COM6 --seconds 90 --out logs/x.log`); typed lines are forwarded to the board, so `MARK level` etc. can be sent while recording |
+| `tools/att_report.py analyze` | finds steady plateaus, prints static/tilt/180 deg metrics and PASS/FAIL |
+| `tools/host_test/mag_fit_test.c` | host-side regression test for the ellipsoid solver (`gcc -O2 -I main tools/host_test/mag_fit_test.c main/mag_fit.c -lm -o mag_fit_test`) |
+| `tools/host_test/make_test_log.py` | builds a synthetic ATT log with known answers (`--bad` for a failing one) to regression-test the analyzer |
+
+`tools/att_report.py record` needs `pyserial`; `analyze` is pure stdlib.
 
 ## Serial output
 

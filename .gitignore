@@ -1,6 +1,9 @@
 /build/
+/build_verify/
+/logs/
 /.vscode/settings.json
 sdkconfig.old
 sdkconfig.backup
 *.swp
 *.swo
+*.exe

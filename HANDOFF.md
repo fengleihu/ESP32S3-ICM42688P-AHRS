@@ -64,16 +64,139 @@ because the same board and the same NVS state are reused. Check in this order:
   line, which makes the path testable without clearing the calibration (send `PING`).
 - Magnetic accuracy depends on the environment; keep the board away from laptops,
   speakers and metal when calibrating and when using it.
-- Min-max magnetometer calibration does not model cross-axis soft iron; the calibrated
-  field magnitude can vary with position.
+- The old min-max calibration modelled no cross-axis soft iron, so the calibrated
+  field magnitude varied with position (57.4 uT measured against a stored radius of
+  45.8 uT). **Fixed 2026-10-25** by the ellipsoid fit below; an old stored min-max
+  calibration is still loadable (converted to a diagonal `soft` matrix) but should be
+  replaced with a fresh `RECAL_MAG`.
 
 ## Next steps
 
-1. Build and flash, then run the checklist above and record the numbers in this file.
+1. Build and flash, then run the four-criteria session below in a clean location and
+   record the numbers in the results table.
 2. Compare ICM-42688-P static noise and drift against the MPU6050 baseline
    (sigma 0.13-0.38 deg, drift -0.19 deg/min).
 3. If the IMU axes turn out differently in practice, correct `imu_to_body()` with a
    proper rotation (determinant +1) and re-run the tilt test.
+
+## Magnetometer calibration: ellipsoid fit (2026-10-25)
+
+### Why the change
+
+Min-max calibration only extracts a per-axis midpoint and half-span, i.e. it models
+hard iron plus **axis-aligned** soft iron. BMM350 sits next to the IMU, the OLED and
+the regulator, so the real soft-iron term has off-diagonal (cross-axis) components.
+The symptom on hardware was that the calibrated field magnitude moved between 45 and
+57 uT depending on where the board was, and that a fresh 15 s rotation gave a
+different radius each time.
+
+### What it does now
+
+- New `main/mag_fit.c` + `main/mag_fit.h`: pure floating-point maths, **no ESP-IDF
+  headers**, so it compiles and runs on the PC (`tools/host_test/mag_fit_test.c`).
+- Solves the general quadric `a x² + b y² + c z² + 2d xy + 2e xz + 2f yz + 2g x +
+  2h y + 2i z = 1` by 9x9 normal equations on samples first centred and scaled to
+  O(1) (µT-scale coordinates otherwise lose precision).
+- Converts the quadric to `(x - c)ᵀ Q (x - c) = 1`, then takes the **symmetric
+  positive-definite square root** `M = V·diag(√λ)·Vᵀ` of `Q`. The ellipsoid alone
+  determines `M` only up to a left rotation; the physical assumption (soft iron is a
+  symmetric PD matrix) picks this branch. Taking a Cholesky factor instead was the
+  first version and it quietly mixed an arbitrary rotation into `M`: the centre and
+  radius were exact, yet heading error over ±60 deg of tilt was 3.9 deg mean / 8.2 deg
+  max. The symmetric root gives 0.000 deg on the same data (regression case 2).
+- Outliers are removed with a two-stage LTS scheme (hard trim to the 75 % smallest
+  residuals, three iterations, then re-admit points within median + 3·MAD) because
+  touching a steel object for a few frames is enough to drag the centre by ~20 uT,
+  and a plain "drop beyond 3σ" loop cannot recover from that (residual σ is already
+  inflated by the outliers).
+- Sanity gates before saving: residual RMS ≤ 20 %, soft-matrix column ratio ≤ 4,
+  radius within 5..500 uT. If the fit is rejected the code falls back to min-max and
+  logs a warning, so a bad fit never silently overwrites a usable calibration.
+- Coverage is still checked independently by the old min/max span ratio (`quality`,
+  gate 0.4). A fit on a 25 deg cone "succeeds" with a 0.96 % residual while the centre
+  is 19.4 uT off — residual cannot detect missing coverage, the span gate can.
+- NVS: blob magic is now `MAG2` (`offset` + 3x3 `soft` + `radius` + `quality` +
+  `residual` + `method`). An existing `MAG1` blob is read and converted to
+  `soft = diag(scale)`, so upgrading does not force a recalibration, but the boot log
+  says so and recommends `RECAL_MAG`.
+
+### Host-side regression test
+
+```
+gcc -O2 -Wall -Wextra -I main tools/host_test/mag_fit_test.c main/mag_fit.c -lm \
+    -o tools/host_test/mag_fit_test.exe
+./tools/host_test/mag_fit_test.exe
+```
+
+Synthetic data, deterministic RNG, all six cases pass:
+
+| Case | Result |
+|---|---|
+| ideal sphere, hard iron only | centre error < 0.05 uT, radius error < 0.2 uT, heading error 0.000 deg |
+| soft iron (1.10/0.94/1.03 + 0.06/0.02/0.03 cross-axis) | centre exact, heading error 0.000 deg — **min-max on the same data: 87.5 deg mean / 179.9 deg max** |
+| 0.5 uT RMS noise | centre error 0.04 uT, fit residual 0.99 %, heading error 0.12 deg mean / 0.26 deg max |
+| 3 % spikes (+80 uT) | centre error 0.04 uT, 485/500 samples kept |
+| 25 deg cone only | centre off 19.4 uT (as expected — this is what the span/quality gate is for) |
+| 40 vs 39 samples | 40 fits, 39 rejected |
+
+The min-max number is a stress case (6 % cross-axis coupling); the point is not that
+real hardware is that bad, but that the old model has a systematic gap that can flip
+heading when the horizontal component gets small.
+
+## Four-criteria measurement (still to run on hardware)
+
+Everything below runs on the PC; the only manual part is moving the board.
+
+1. Clean location: no laptop, speaker, PSU or metal within ~0.5 m. Board level and
+   still for the gyro bias window.
+2. Recalibrate:
+   ```
+   python tools/att_report.py record --port COM6 --seconds 120 --out logs/cal.log
+   ```
+   Type `RECAL_MAG` and press Enter. The board reboots, gyro-calibrates, then asks for
+   the 15 s rotation; rotate slowly through all orientations (all three axes must
+   swing, `画 8 字`). Look for
+   `校准完成（椭球拟合）：样本 N（拟合 M，剔除 K） offset=[...] 半径=... 残差=...% 覆盖度=...`
+   and `Mag calibration OK: samples=... method=椭球拟合 quality=... radius=...`.
+3. Four criteria in one recording, marking each steady state with `MARK`:
+   ```
+   python tools/att_report.py record --port COM6 --seconds 90 --out logs/criteria.log
+   ```
+   then, in order: board level → `MARK level`; tilt ~30 deg and hold → `MARK tilt30`;
+   back to level → `MARK level2`; rotate 180 deg about the vertical axis and hold →
+   `MARK turn180`. Marks do not need to be precisely timed: the analyzer finds steady
+   plateaus itself and only compares plateau means.
+4. Judge:
+   ```
+   python tools/att_report.py analyze logs/*.log
+   ```
+   Exit code 0 = all criteria pass. The tool prints the plateau table, the
+   plateau-to-plateau deltas and a PASS/FAIL block with the measured numbers.
+
+Checks implemented (thresholds are CLI options):
+
+| # | Criterion | Default limit |
+|---|---|---|
+| 1 | static yaw σ (detrended) | ≤ 0.5 deg |
+| 2 | yaw drift | ≤ 2.0 deg/min |
+| 3 | \|yaw − magnetic heading\| | ≤ 1.0 deg |
+| 4 | yaw change while tilting 20..45 deg | ≤ 2.0 deg |
+| 5 | 180 deg turn error | ≤ 5.0 deg |
+
+### Results (to fill after the session)
+
+| Item | Criterion | Measured | Verdict |
+|---|---|---|---|
+| Magnetic calibration | residual, coverage, radius | pending | pending |
+| Static | yaw σ | pending | pending |
+| Static | drift | pending | pending |
+| Static | \|yaw − mag heading\| | pending | pending |
+| Tilt 30 deg | yaw change | pending | pending |
+| 180 deg turn | \|Δyaw − 180\| | pending | pending |
+
+The analyzer is itself regression-tested against a fixture with known answers
+(`tools/host_test/make_test_log.py`): the "good" log passes all five checks, the
+`--bad` log (σ 1.6 deg, 12 deg tilt-induced yaw error, 174 deg turn) fails three.
 
 ## ICM-42688-P migration and bring-up (2026-10-24)
 
@@ -105,4 +228,7 @@ Static measurement (30 s, board level and still):
   (position dependent, same behaviour as the MPU6050 build).
 
 Pending: tilt (~30 deg) and edge-aligned 180 deg dynamic checks, to be recorded after
-the next measurement session.
+the next measurement session. See *Four-criteria measurement* above for the exact
+commands; the ellipsoid-fit recalibration should be redone in the same clean location
+first, because that stored radius (45.8 uT, min-max era) is what produced the 57.4 uT
+mismatch.
