@@ -3,16 +3,17 @@
  *
  * 提供三件事：
  *   1) 初始化与读取（float 微特斯拉，Bosch 官方补偿已做）
- *   2) 硬磁校准（min-max 法，转动设备采样），结果存 NVS 掉电不丢
+ *   2) 磁校准（椭球拟合为主，min-max 兜底），转动设备采样，结果存 NVS 掉电不丢
  *   3) 轴向映射（Kconfig 可配，用于磁力计与陀螺仪丝印方向不一致时纠正）
  *
- * 与 AHRS 工程那份 mag.c 的关系：逻辑同源（同一套 min-max 校准、同样的质量指标），
- * 但去掉了 9 轴融合里与本工程无关的部分，并且把校准改成"只在校准期间阻塞"，
- * 不影响采样循环。
- *
- * 为什么磁力计必须校准：未校准的磁力计做 9 轴融合，结果比 6 轴还差 ——
- * 硬磁偏移会让 yaw 出现随姿态变化的系统性误差。
+ * 校准方法为什么换过：第一版是 min-max（每轴取最大/最小值得偏移与缩放），
+ * 它假设软磁只沿坐标轴、没有交叉轴耦合，而且少转半个圈就会把半径估小。
+ * 实测这个模块用 min-max 校准后，"校准后磁场模长"随位置在 45~57 µT 之间变，
+ * 说明模型不够。现在用椭球拟合（main/mag_fit.c，纯数学、有主机侧单元测试），
+ * 同时解出硬磁偏移、三轴缩放和交叉轴耦合；样本覆盖率不足或拟合退化时
+ * 自动回退到 min-max。
  */
+
 #pragma once
 
 #include <stdbool.h>
@@ -28,11 +29,19 @@ extern "C" {
 /* Bosch 驱动句柄的前置声明：头文件不必把 bmm350.h 暴露给所有使用者 */
 struct bmm350_dev;
 
+typedef enum {
+    MAG_CAL_METHOD_NONE = 0,
+    MAG_CAL_METHOD_MINMAX = 1,    /* 旧方法，仅在椭球拟合失败时回退使用 */
+    MAG_CAL_METHOD_ELLIPSOID = 2, /* 默认 */
+} mag_cal_method_t;
+
 typedef struct {
     float offset[3]; /* 硬磁偏移 µT */
-    float scale[3];  /* 软磁缩放（无量纲） */
+    float soft[9];   /* 3x3 行主序：out = soft * (in - offset)，含软磁与三轴缩放 */
     float radius;    /* 校准后磁场平均半径 µT */
     float quality;   /* 0~1：三个轴转动幅度是否均衡，<0.4 说明没转开 */
+    float residual;  /* 椭球拟合残差（归一化半径 RMS，0.01 = 1%）；min-max 时为 0 */
+    uint8_t method;  /* mag_cal_method_t */
     bool valid;
 } mag_cal_t;
 
@@ -85,7 +94,8 @@ bool mag_cal_is_running(void);
 float mag_cal_progress(void); /* 0~1 */
 
 /**
- * 喂一个原始样本。到时间后自动结束：算偏移/缩放、存 NVS。
+ * 喂一个原始样本（机体系、已轴向映射）。到时间后自动结束：
+ * 先用椭球拟合算 offset/soft，拟合失败则回退 min-max，结果存 NVS。
  * @return true = 本次调用刚好结束校准
  */
 bool mag_cal_process(const float raw[3]);
@@ -96,13 +106,16 @@ void mag_cal_abort(void);
 /** 是否已有可用校准数据（NVS 或本次运行） */
 bool mag_is_calibrated(void);
 
+/** 校准方法名称（日志用） */
+const char *mag_cal_method_name(uint8_t method);
+
 /** 取校准参数副本 */
 void mag_cal_get(mag_cal_t *out);
 
 /** 清除校准（内存 + NVS） */
 esp_err_t mag_cal_clear(void);
 
-/** 应用校准：out = (in - offset) * scale */
+/** 应用校准：out = soft * (in - offset) */
 void mag_apply(const mag_cal_t *c, const float in[3], float out[3]);
 
 #ifdef __cplusplus

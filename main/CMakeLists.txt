@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "att_i2c_bus.c"
         "mag.c"
+        "mag_fit.c"
         "mag_axis.c"
         "icm42688p.c"
         "ahrs.c"

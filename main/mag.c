@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "mag_axis.h"
+#include "mag_fit.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 
@@ -16,12 +17,27 @@ static const char *TAG = "mag";
 #define MAG_NVS_NS       "att9axis"
 #define MAG_NVS_KEY      "magcal"
 #define MAG_NVS_AXIS_KEY "magaxis"
-#define MAG_NVS_MAGIC    0x4D414731u /* "MAG1" */
+#define MAG_NVS_MAGIC    0x4D414732u /* "MAG2"：椭球拟合（offset + 3x3 soft） */
+#define MAG_NVS_MAGIC_V1 0x4D414731u /* "MAG1"：旧的 min-max（offset + scale[3]） */
 
 typedef struct {
     uint32_t magic;
     mag_cal_t cal;
 } mag_nvs_blob_t;
+
+/* 旧版 NVS 内容，只用于读取兼容（升级固件后不需要重新校准两次） */
+typedef struct {
+    float offset[3];
+    float scale[3];
+    float radius;
+    float quality;
+    bool valid;
+} mag_cal_v1_t;
+
+typedef struct {
+    uint32_t magic;
+    mag_cal_v1_t cal;
+} mag_nvs_blob_v1_t;
 
 static struct bmm350_dev s_dev;
 static bool s_present;
@@ -34,6 +50,26 @@ static int64_t s_cal_start_us;
 static uint32_t s_cal_duration_us;
 static int s_cal_count;
 static float s_min[3], s_max[3];
+
+/* 椭球拟合用的样本缓存（静态：app_main 的栈只有几 KB，不能放局部数组）。
+ * 15 秒 × 25 Hz ≈ 375 个样本，512 个槽够用；真跑更久就先抽稀一半再存，
+ * 保证内存有上界。 */
+static float s_samples[MAG_FIT_MAX_SAMPLES][3];
+static int s_stored;
+static uint32_t s_seen;
+static uint32_t s_decim = 1;
+
+const char *mag_cal_method_name(uint8_t method)
+{
+    switch (method) {
+    case MAG_CAL_METHOD_ELLIPSOID:
+        return "椭球拟合";
+    case MAG_CAL_METHOD_MINMAX:
+        return "min-max";
+    default:
+        return "无";
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* 轴向映射                                                            */
@@ -166,9 +202,12 @@ void mag_apply(const mag_cal_t *c, const float in[3], float out[3])
         out[2] = in[2];
         return;
     }
-    for (int i = 0; i < 3; i++) {
-        out[i] = (in[i] - c->offset[i]) * c->scale[i];
-    }
+    const float d0 = in[0] - c->offset[0];
+    const float d1 = in[1] - c->offset[1];
+    const float d2 = in[2] - c->offset[2];
+    out[0] = c->soft[0] * d0 + c->soft[1] * d1 + c->soft[2] * d2;
+    out[1] = c->soft[3] * d0 + c->soft[4] * d1 + c->soft[5] * d2;
+    out[2] = c->soft[6] * d0 + c->soft[7] * d1 + c->soft[8] * d2;
 }
 
 /* ------------------------------------------------------------------ */
@@ -180,14 +219,43 @@ static void cal_load(void)
     if (nvs_open(MAG_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
         return;
     }
-    mag_nvs_blob_t blob;
-    size_t len = sizeof(blob);
-    if (nvs_get_blob(h, MAG_NVS_KEY, &blob, &len) == ESP_OK && len == sizeof(blob) &&
-        blob.magic == MAG_NVS_MAGIC && blob.cal.valid) {
-        s_cal = blob.cal;
-        ESP_LOGI(TAG, "已载入磁力计校准：offset=[%.1f, %.1f, %.1f] µT 半径=%.1f µT 质量=%.2f",
-                 s_cal.offset[0], s_cal.offset[1], s_cal.offset[2], s_cal.radius,
-                 s_cal.quality);
+
+    size_t len = 0;
+    if (nvs_get_blob(h, MAG_NVS_KEY, NULL, &len) == ESP_OK) {
+        if (len == sizeof(mag_nvs_blob_t)) {
+            mag_nvs_blob_t blob;
+            size_t l = sizeof(blob);
+            if (nvs_get_blob(h, MAG_NVS_KEY, &blob, &l) == ESP_OK &&
+                blob.magic == MAG_NVS_MAGIC && blob.cal.valid) {
+                s_cal = blob.cal;
+                ESP_LOGI(TAG, "已载入磁力计校准（%s）：offset=[%.1f, %.1f, %.1f] µT "
+                              "半径=%.1f µT 质量=%.2f 残差=%.2f%%",
+                         mag_cal_method_name(s_cal.method), s_cal.offset[0],
+                         s_cal.offset[1], s_cal.offset[2], s_cal.radius, s_cal.quality,
+                         100.0f * s_cal.residual);
+            }
+        } else if (len == sizeof(mag_nvs_blob_v1_t)) {
+            /* 旧版 min-max 校准：等价于 soft = diag(scale)，直接换算，不必重校准 */
+            mag_nvs_blob_v1_t old;
+            size_t l = sizeof(old);
+            if (nvs_get_blob(h, MAG_NVS_KEY, &old, &l) == ESP_OK &&
+                old.magic == MAG_NVS_MAGIC_V1 && old.cal.valid) {
+                memset(&s_cal, 0, sizeof(s_cal));
+                memcpy(s_cal.offset, old.cal.offset, sizeof(s_cal.offset));
+                for (int i = 0; i < 3; i++) {
+                    s_cal.soft[i * 4] = old.cal.scale[i];
+                }
+                s_cal.radius = old.cal.radius;
+                s_cal.quality = old.cal.quality;
+                s_cal.method = MAG_CAL_METHOD_MINMAX;
+                s_cal.valid = true;
+                ESP_LOGW(TAG, "已载入旧版 min-max 校准：offset=[%.1f, %.1f, %.1f] µT "
+                              "半径=%.1f µT。它没有交叉轴软磁项，建议发 RECAL_MAG "
+                              "重跑一次椭球拟合",
+                         s_cal.offset[0], s_cal.offset[1], s_cal.offset[2],
+                         s_cal.radius);
+            }
+        }
     }
     nvs_close(h);
 }
@@ -362,7 +430,7 @@ esp_err_t mag_read_unmapped(float raw[3])
 }
 
 /* ------------------------------------------------------------------ */
-/* 硬磁校准：min-max 法                                                */
+/* 磁校准：椭球拟合为主，min-max 兜底                                    */
 /* ------------------------------------------------------------------ */
 void mag_cal_start(uint32_t duration_ms)
 {
@@ -370,6 +438,9 @@ void mag_cal_start(uint32_t duration_ms)
     s_cal_start_us = esp_timer_get_time();
     s_cal_duration_us = duration_ms * 1000u;
     s_cal_count = 0;
+    s_stored = 0;
+    s_seen = 0;
+    s_decim = 1;
     for (int i = 0; i < 3; i++) {
         s_min[i] = 1e9f;
         s_max[i] = -1e9f;
@@ -409,21 +480,35 @@ bool mag_cal_process(const float raw[3])
     }
     s_cal_count++;
 
+    /* 存进拟合缓存；满了就抽稀一半（保留偶数号），把采样间隔翻倍。
+     * 正常情况下 15 秒只有 375 个样本，永远走不到抽稀分支。 */
+    if ((s_seen++ % s_decim) == 0) {
+        if (s_stored < MAG_FIT_MAX_SAMPLES) {
+            memcpy(s_samples[s_stored], raw, sizeof(float) * 3);
+            s_stored++;
+        } else if (s_decim < 64) {
+            for (int i = 0; i < MAG_FIT_MAX_SAMPLES / 2; i++) {
+                memcpy(s_samples[i], s_samples[2 * i], sizeof(float) * 3);
+            }
+            s_stored = MAG_FIT_MAX_SAMPLES / 2;
+            s_decim *= 2;
+        }
+    }
+
     if (esp_timer_get_time() - s_cal_start_us < (int64_t)s_cal_duration_us) {
         return false;
     }
 
-    /* ---- 结束：算偏移与缩放 ---- */
+    /* ---- 结束 ---- */
     s_cal_running = false;
 
-    float half[3], offs[3];
+    float half[3];
     for (int i = 0; i < 3; i++) {
         if (s_max[i] <= s_min[i]) {
             ESP_LOGE(TAG, "校准失败：轴 %d 没有变化（是不是没转动？）", i);
             memset(&s_cal, 0, sizeof(s_cal));
             return true;
         }
-        offs[i] = (s_max[i] + s_min[i]) * 0.5f;
         half[i] = (s_max[i] - s_min[i]) * 0.5f;
     }
     float avg = (half[0] + half[1] + half[2]) / 3.0f;
@@ -433,13 +518,9 @@ bool mag_cal_process(const float raw[3])
         return true;
     }
 
-    for (int i = 0; i < 3; i++) {
-        s_cal.offset[i] = offs[i];
-        s_cal.scale[i] = (half[i] > 1.0f) ? (avg / half[i]) : 1.0f;
-    }
-    s_cal.radius = avg;
-
-    /* 质量：三轴转动幅度越接近 1 越好 */
+    /* 覆盖率：三轴转动幅度越接近 1 越好。与校准方法无关，是独立的门限：
+     * 只在一个方向晃一晃时，椭球拟合会"成功"但中心可以偏出十几 µT
+     * （tools/host_test 的用例 5 就是这个），必须靠它拦下来。 */
     float mn = half[0] < half[1] ? half[0] : half[1];
     if (half[2] < mn) {
         mn = half[2];
@@ -448,16 +529,51 @@ bool mag_cal_process(const float raw[3])
     if (half[2] > mx) {
         mx = half[2];
     }
-    s_cal.quality = mx > 0.0f ? (mn / mx) : 0.0f;
-    s_cal.valid = true;
+    float quality = mx > 0.0f ? (mn / mx) : 0.0f;
 
-    ESP_LOGI(TAG, "校准完成（%d 样本）：offset=[%.1f, %.1f, %.1f] µT "
-                  "scale=[%.3f, %.3f, %.3f] 半径=%.1f µT 质量=%.2f",
-             s_cal_count, s_cal.offset[0], s_cal.offset[1], s_cal.offset[2],
-             s_cal.scale[0], s_cal.scale[1], s_cal.scale[2], s_cal.radius, s_cal.quality);
+    memset(&s_cal, 0, sizeof(s_cal));
+    mag_fit_result_t fit;
+    bool fitted = (s_stored >= 40) &&
+                  mag_fit_ellipsoid(&s_samples[0][0], s_stored, &fit);
+
+    if (fitted) {
+        memcpy(s_cal.offset, fit.center, sizeof(s_cal.offset));
+        memcpy(s_cal.soft, fit.soft, sizeof(s_cal.soft));
+        s_cal.radius = fit.radius;
+        s_cal.residual = fit.residual;
+        s_cal.method = MAG_CAL_METHOD_ELLIPSOID;
+        s_cal.valid = true;
+        ESP_LOGI(TAG, "校准完成（椭球拟合）：样本 %d（拟合 %d，剔除 %d） "
+                      "offset=[%.1f, %.1f, %.1f] µT 半径=%.1f µT 残差=%.2f%% 覆盖度=%.2f",
+                 s_cal_count, s_stored, s_stored - fit.used, s_cal.offset[0],
+                 s_cal.offset[1], s_cal.offset[2], s_cal.radius,
+                 100.0f * s_cal.residual, quality);
+        if (fit.used < (s_stored * 9) / 10) {
+            ESP_LOGW(TAG, "超过 10%% 的样本被当成离群点剔除（%d/%d）：转动时是否"
+                          "蹭到铁磁物了？", s_stored - fit.used, s_stored);
+        }
+    } else {
+        /* 回退：min-max。只在椭球拟合失败（样本太少/退化）时才会走到这里，
+         * 它的模型没有交叉轴软磁项，精度差一个量级。 */
+        float offs[3];
+        for (int i = 0; i < 3; i++) {
+            offs[i] = (s_max[i] + s_min[i]) * 0.5f;
+            s_cal.offset[i] = offs[i];
+            s_cal.soft[i * 4] = (half[i] > 1.0f) ? (avg / half[i]) : 1.0f;
+        }
+        s_cal.radius = avg;
+        s_cal.method = MAG_CAL_METHOD_MINMAX;
+        s_cal.valid = true;
+        ESP_LOGW(TAG, "椭球拟合不可用（%d 个样本），回退 min-max：offset=[%.1f, %.1f, "
+                      "%.1f] µT 半径=%.1f µT",
+                 s_stored, s_cal.offset[0], s_cal.offset[1], s_cal.offset[2],
+                 s_cal.radius);
+    }
+
+    s_cal.quality = quality;
     if (s_cal.quality < 0.4f) {
-        ESP_LOGW(TAG, "三轴转动幅度不均衡（质量 %.2f），建议再转一次、三个方向都转到位",
-                 s_cal.quality);
+        ESP_LOGW(TAG, "三轴转动幅度不均衡（覆盖度 %.2f），建议再转一次、"
+                      "三个方向都转到位", s_cal.quality);
     }
 
     if (cal_save() != ESP_OK) {
