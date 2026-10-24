@@ -149,9 +149,12 @@ Everything below runs on the PC; the only manual part is moving the board.
 
 1. Clean location: no laptop, speaker, PSU or metal within ~0.5 m. Board level and
    still for the gyro bias window.
+   The board's USB-Serial-JTAG enumerates as **COM3** on this machine (it moves if you
+   use another USB port); check with
+   `[System.IO.Ports.SerialPort]::GetPortNames()` or the device manager.
 2. Recalibrate:
    ```
-   python tools/att_report.py record --port COM6 --seconds 120 --out logs/cal.log
+   python tools/att_report.py record --port COM3 --seconds 120 --out logs/cal.log
    ```
    Type `RECAL_MAG` and press Enter. The board reboots, gyro-calibrates, then asks for
    the 15 s rotation; rotate slowly through all orientations (all three axes must
@@ -160,7 +163,7 @@ Everything below runs on the PC; the only manual part is moving the board.
    and `Mag calibration OK: samples=... method=椭球拟合 quality=... radius=...`.
 3. Four criteria in one recording, marking each steady state with `MARK`:
    ```
-   python tools/att_report.py record --port COM6 --seconds 90 --out logs/criteria.log
+   python tools/att_report.py record --port COM3 --seconds 90 --out logs/criteria.log
    ```
    then, in order: board level → `MARK level`; tilt ~30 deg and hold → `MARK tilt30`;
    back to level → `MARK level2`; rotate 180 deg about the vertical axis and hold →
@@ -197,6 +200,32 @@ Checks implemented (thresholds are CLI options):
 The analyzer is itself regression-tested against a fixture with known answers
 (`tools/host_test/make_test_log.py`): the "good" log passes all five checks, the
 `--bad` log (σ 1.6 deg, 12 deg tilt-induced yaw error, 174 deg turn) fails three.
+
+### Hardware run 2026-10-25 (desk, not a clean location)
+
+The new firmware was built, flashed to the board (COM3, USB-Serial-JTAG) and booted:
+
+```
+E (152) icm42688p: I2C 地址 0x68 无应答 ...            <- expected, AP_AD0 high
+I (229) icm42688p: ICM42688P 就绪：addr=0x69 WHO_AM_I=0x47 PWR=0x0F GYRO=0x47 ACCEL=0x67
+I (1671) icm42688p: 陀螺零偏校准完成 (200 样本)：bias = [-0.444, -0.135, 0.021] °/s
+I (1828) mag: BMM350 在线：地址=0x14 chip_id=0x33
+W (1877) mag: 已载入旧版 min-max 校准：offset=[-60.7, -3.9, 83.8] µT 半径=45.8 µT
+I (1878) mag: 轴向映射：已从 NVS 载入 idx=19
+CMD_READY,RECAL_MAG
+```
+
+- the `MAG1` -> `MAG2` migration works on real NVS data: the old min-max numbers are
+  loaded, `method=min-max`, and the warning asks for `RECAL_MAG`;
+- `MARK smoke` -> `MARK,32089,smoke`, and `PING` -> `serial command received: PING`;
+- `CMD_READY,RECAL_MAG` is unchanged, so the `pc_viewer` recalibration button still
+  enables (checked in `pc_viewer/index.html`, which compares the line exactly);
+- one 23 s static capture analysed with `tools/att_report.py`: yaw σ 0.055 deg, drift
+  1.46 deg/min, \|yaw − mag heading\| 0.11 deg, all PASS — but \|B\| = 49.6 µT against
+  the stored radius 45.8 µT, i.e. the old min-max calibration is indeed the weak link.
+
+Nothing here replaces the clean-location session: the desk is full of magnetic
+distortion, so the recalibration and the four criteria are still pending.
 
 ## ICM-42688-P migration and bring-up (2026-10-24)
 

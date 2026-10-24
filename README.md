@@ -102,7 +102,7 @@ truncated.
 
 | Tool | What it does |
 |---|---|
-| `tools/att_report.py record` | captures the serial log (`--port COM6 --seconds 90 --out logs/x.log`); typed lines are forwarded to the board, so `MARK level` etc. can be sent while recording |
+| `tools/att_report.py record` | captures the serial log (`--port COM3 --seconds 90 --out logs/x.log`; the board enumerates as COM3 on this machine); typed lines are forwarded to the board, so `MARK level` etc. can be sent while recording |
 | `tools/att_report.py analyze` | finds steady plateaus, prints static/tilt/180 deg metrics and PASS/FAIL |
 | `tools/host_test/mag_fit_test.c` | host-side regression test for the ellipsoid solver (`gcc -O2 -I main tools/host_test/mag_fit_test.c main/mag_fit.c -lm -o mag_fit_test`) |
 | `tools/host_test/make_test_log.py` | builds a synthetic ATT log with known answers (`--bad` for a failing one) to regression-test the analyzer |
