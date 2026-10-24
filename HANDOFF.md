@@ -57,8 +57,11 @@ because the same board and the same NVS state are reused. Check in this order:
 
 ## Known issues carried over
 
-- `RECAL_MAG` is unreachable over the native USB port (stdin is UART0).
-  Use `CONFIG_APP_MAG_FORCE_RECAL=y` for a one-shot calibration flash.
+- `RECAL_MAG` now works over the native USB port: the primary console is
+  USB-Serial-JTAG (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, secondary NONE), so the
+  command task receives viewer input. Application logs are USB-only; UART0 no longer
+  prints app logs. The command task also logs `serial command received: ...` for any
+  line, which makes the path testable without clearing the calibration (send `PING`).
 - Magnetic accuracy depends on the environment; keep the board away from laptops,
   speakers and metal when calibrating and when using it.
 - Min-max magnetometer calibration does not model cross-axis soft iron; the calibrated

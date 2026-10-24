@@ -313,6 +313,9 @@ static void serial_command_task(void *arg)
         }
         if (ch == '\n') {
             command[length] = '\0';
+            if (length > 0) {
+                ESP_LOGI(TAG, "serial command received: %s", command);
+            }
             if (!overflow && strcmp(command, MAG_RECAL_COMMAND) == 0) {
                 request_mag_recalibration();
             }

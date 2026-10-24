@@ -63,10 +63,12 @@ rather than touching the AHRS math.
 
 ## Request magnetometer recalibration
 
-The `RECAL_MAG` serial command and the PC viewer button have the same known limitation
-as the MPU6050 project: firmware reads the primary UART0 console while the board is
-wired to the native USB-Serial-JTAG port. Use `CONFIG_APP_MAG_FORCE_RECAL=y` for one
-flash if a recalibration is needed, then turn it back off.
+The `RECAL_MAG` serial command works over the native USB port. `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`
+makes USB-Serial-JTAG the primary console, so the firmware command task receives typed input.
+Type `RECAL_MAG` (or use the viewer button) and the firmware stores a one-shot request,
+restarts, clears only the magnetic calibration, and asks for the 15-second rotation.
+`CONFIG_APP_MAG_FORCE_RECAL` remains available as a build-time override. Application logs
+now go to the USB console only; UART0 no longer prints application logs.
 
 ## Serial output
 
