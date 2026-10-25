@@ -288,12 +288,49 @@ Verified without moving the board:
 
 Still to do: run the six faces for real, then repeat the tilt test.
 
+### Two-way tilt diagnostic (2026-10-25)
+
+Goal: tell a systematic tilt error (accelerometer / mounting skew) apart from a field
+gradient — tilt +30° and then −30° about the same axis with the board's centre staying
+put. If the heading error flips sign between the two tilts, it is systematic; if it keeps
+the same sign, the field is moving with the board.
+
+States (all via the console), heading / dip / ≈|B|:
+
+| state | yaw | dip | \|B\| |
+|---|---|---|---|
+| level | 67.9° | −48.3° | 48.6 µT |
+| roll +31° | 70.2° | −48.8° | 49.1 µT |
+| pitch +30° | 72.5° | −47.8° | 48.8 µT |
+| pitch −30° | 74.1° | −48.6° | 48.6 µT |
+| level | 70.0° | −48.1° | 48.1 µT |
+
+Gyro-referenced heading errors: +0.4° (level→roll+30), −1.3° (roll+30→pitch+30),
++4.8° (pitch+30→pitch−30), −2.7° (pitch−30→level); the 186° turn still tracked to 0.6°.
+
+Verdict: not a clean systematic — and this run is dominated by the environment. During a
+51 s static stretch the yaw drifted 3.4°/min and |B| changed 51.0 → 48.1 µT (5.7 %)
+between two level segments, i.e. merely bringing a hand near the board changes the field
+by more than the effect being measured. Note also that dip has come out anywhere between
+48° and 60° across the runs — the board is being measured in very different fields.
+
+Tool change made during this diagnostic: the gyro reference now integrates the proper
+heading rate `ψ̇ = (q·sinφ + r·cosφ)/cosθ` instead of GZ alone. They differ by several
+degrees during a 30° attitude change (GZ alone turned a 3.6° integral into a 7.0° one in
+this log), so the earlier "magnetic error" figures for tilted states were inflated.
+
+Next: repeat the four criteria plus this two-way tilt on the floor, ≥1.5 m from the
+laptop and from the operator's body (needs a longer USB cable). Only then is the
+1.3-3.6° spread meaningful to attribute.
+
 ### Next steps
 
-1. Six-face accelerometer calibration via the console, then re-run the tilt test — the
-   expectation is <1° of tilt-induced heading error (from 1.3-3.6° now).
-2. If it is still above ~1.5°, estimate a small accel-vs-mag mounting rotation (1-2°):
-   the 24-entry axis map can only express multiples of 90°.
+1. Move to a clean spot (floor, ≥1.5 m from laptop and body, long USB cable) and repeat:
+   four criteria + the two-way tilt. Everything measured so far has dip between 48° and
+   60° and |B| between 44.9 and 51.0 µT, which is itself evidence that the desk is not a
+   valid measurement site.
+2. Only if the tilt error survives the clean spot: attack the magnetometer side
+   (accel-vs-mag mounting skew, or a 3x3 soft-iron refit from a longer tumble).
 3. Push the branch (currently ahead of origin by several commits).
 
 ### First boot after the calibration change (2026-10-25)

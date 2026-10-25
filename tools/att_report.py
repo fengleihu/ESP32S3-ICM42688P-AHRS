@@ -207,16 +207,28 @@ def has_gyro(rows) -> bool:
     return bool(rows) and C_GZ in rows[0]
 
 
-def cum_gyro_z(rows):
-    """陀螺 Z 轴的累计角度（度），用来给航向变化做独立参考。
+def cum_heading_deg(rows):
+    """由陀螺积分出的航向（度），作为与磁无关的参考。
 
-    为什么需要：只看 yaw/磁航向分不清"人真的把板子转了"和"磁航向被倾斜
-    补偿算歪了"。陀螺在这几秒内的积分是独立于磁的：两者对不上，问题就在磁侧。
+    注意不是简单积 GZ：机体坐标的角速度要投影到世界竖直轴才是航向变化，
+       ψ̇ = (q·sinφ + r·cosφ) / cosθ
+    （φ=roll、θ=pitch，取自 ATT）。板子水平时 ψ̇≈r，所以只积 GZ 在小倾角下
+    够用；一旦倾斜 30°，用 RZ 直接积会进出几度的假航向 —— 之前几次"倾斜时
+    磁航向误差"就是这么被放大的。
     """
     cum = [0.0] * len(rows)
+
+    def rate(r):
+        phi = math.radians(r[C_ROLL])
+        theta = math.radians(r[C_PITCH])
+        ct = math.cos(theta)
+        if abs(ct) < 0.2:
+            ct = 0.2 if ct >= 0 else -0.2
+        return (r[C_GY] * math.sin(phi) + r[C_GZ] * math.cos(phi)) / ct
+
     for i in range(1, len(rows)):
         dt = rows[i]["t"] - rows[i - 1]["t"]
-        cum[i] = cum[i - 1] + 0.5 * (rows[i][C_GZ] + rows[i - 1][C_GZ]) * dt
+        cum[i] = cum[i - 1] + 0.5 * (rate(rows[i]) + rate(rows[i - 1])) * dt
     return cum
 
 
@@ -555,7 +567,7 @@ def analyze_file(path, args):
     # ---- 相邻状态之间的变化 ----
     if len(state_list) >= 2:
         gyro = has_gyro(rows)
-        cum = cum_gyro_z(rows) if gyro else None
+        cum = cum_heading_deg(rows) if gyro else None
         print("\n== 相邻状态变化 ==")
         if gyro:
             print("{:<14}->{:<14}{:>8}{:>8}{:>8}{:>8}{:>10}".format(
