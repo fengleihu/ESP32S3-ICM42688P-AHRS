@@ -36,8 +36,30 @@ def gen(path, bad=False, seed=42):
     sigma = 0.08 if not bad else 1.6
     tilt_induced_yaw = 0.15 if not bad else 12.0  # 倾斜时被带偏的角度
     turn_angle = 180.0 if not bad else 174.0
+    world_dip = 55.0  # 世界系磁场倾角，地点的属性，必须与姿态无关
 
-    def emit(t, yaw_true, pitch_true):
+    def body_field(roll, pitch, yaw, b):
+        """世界系磁场（指向磁北、倾角 world_dip）-> 机体系。
+
+        R = Rz(yaw)·Ry(pitch)·Rx(roll)，机体系磁场 = Rᵀ·世界系。
+        必须这样生成：如果像第一版那样直接按 pitch 写分量，磁场就变成"跟着板子
+        转"了，磁倾角会随倾斜变 60°——真实世界不会这样，工具现在也会把它判成
+        环境异常。
+        """
+        r, p, y = [math.radians(v) for v in (roll, pitch, yaw)]
+        cr, sr = math.cos(r), math.sin(r)
+        cp, sp = math.cos(p), math.sin(p)
+        cy, sy = math.cos(y), math.sin(y)
+        rot = [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ]
+        bw = [b * math.cos(math.radians(world_dip)), 0.0,
+              -b * math.sin(math.radians(world_dip))]
+        return [sum(rot[k][i] * bw[k] for k in range(3)) for i in range(3)]
+
+    def emit(t, yaw_true, pitch_true, gz):
         nonlocal ms
         y = yaw_true + rnd.gauss(0.0, sigma)
         p = pitch_true + rnd.gauss(0.0, 0.05)
@@ -48,18 +70,18 @@ def gen(path, bad=False, seed=42):
         ay = math.sin(math.radians(r)) * 1000.0
         az = math.cos(math.radians(p)) * math.cos(math.radians(r)) * 1000.0
         b = 57.4 * (1.0 + rnd.gauss(0.0, 0.003))
-        mx = b * math.cos(math.radians(hdg)) * math.cos(math.radians(p))
-        my = b * math.sin(math.radians(hdg)) * math.cos(math.radians(p))
-        mz = -b * math.sin(math.radians(p))
+        mx, my, mz = body_field(r, p, yaw_true, b)
         raw = 1.12
         lines.append(
-            "ATT,%d,%.2f,%.2f,%.2f,1,1,%d,%d,%d,1,1,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f"
+            "ATT,%d,%.2f,%.2f,%.2f,1,1,%d,%d,%d,1,1,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+            "%.2f,%.3f,%.3f,%.3f"
             % (ms, r, p, y, int(ax), int(ay), int(az), hdg, mx, my, mz,
-               raw * mx, raw * my, raw * mz))
+               raw * mx, raw * my, raw * mz, 0.0, 0.0, gz))
         ms += int(step * 1000)
 
     mark_idx = 0
     t = 0.0
+    prev_yaw_true = None
     while t < 95.0:
         while mark_idx < len(marks) and t >= marks[mark_idx][0]:
             lines.append("MARK,%d,%s" % (ms, marks[mark_idx][1]))
@@ -78,14 +100,19 @@ def gen(path, bad=False, seed=42):
             pitch_true = 0.0
 
         if t < 70.0:
-            yaw_true = drift_rate * t
+            yaw_phys = drift_rate * t
         elif t < 73.0:
-            yaw_true = drift_rate * t + turn_angle * (t - 70.0) / 3.0
+            yaw_phys = drift_rate * t + turn_angle * (t - 70.0) / 3.0
         else:
-            yaw_true = drift_rate * t + turn_angle
-        yaw_true += tilt_induced_yaw * (pitch_true / 30.0)
+            yaw_phys = drift_rate * t + turn_angle
+        # 真实转动 = yaw_phys；磁侧误差（倾斜带偏）不产生角速度，所以陀螺只积
+        # yaw_phys。这也是"用陀螺当参考"能分清人转和磁错的原因。
+        yaw_true = yaw_phys + tilt_induced_yaw * (pitch_true / 30.0)
 
-        emit(t, yaw_true, pitch_true)
+        gz = 0.0 if prev_yaw_true is None else (yaw_phys - prev_yaw_true) / step
+        prev_yaw_true = yaw_phys
+
+        emit(t, yaw_true, pitch_true, gz)
         t += step
 
     lines.append("I (99999) att9axis: Mag calibration OK: samples=375 method=椭球拟合 quality=0.88 radius=57.4 uT residual=1.20%")

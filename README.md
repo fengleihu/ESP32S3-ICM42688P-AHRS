@@ -111,9 +111,21 @@ truncated.
 
 ## Serial output
 
-Same 18-column `ATT` format as the MPU6050 project:
+`ATT` line every 100 ms. The first 19 tokens are the same as the MPU6050 project;
+tokens 20-22 are new (gyro, for the measurement tool):
 
-`ATT,ms,roll,pitch,yaw,mag_present,mag_calibrated,accel_x_mg,accel_y_mg,accel_z_mg,mag_fresh,mag_heading_valid,mag_heading_deg,cal_mag_x,cal_mag_y,cal_mag_z,raw_mapped_mag_x,raw_mapped_mag_y,raw_mapped_mag_z`
+```
+ATT,ms,roll,pitch,yaw,mag_present,mag_calibrated,
+    accel_x_mg,accel_y_mg,accel_z_mg,mag_fresh,mag_heading_valid,mag_heading_deg,
+    cal_mag_x,cal_mag_y,cal_mag_z,raw_mapped_mag_x,raw_mapped_mag_y,raw_mapped_mag_z,
+    gyro_x_dps,gyro_y_dps,gyro_z_dps
+```
+
+The gyro columns exist so `tools/att_report.py` can compare a heading change against an
+independent inertial reference: a magnetic heading that moves while the gyro integral
+stays at zero is a magnetism problem, not a rotation of the board.
+
+`pc_viewer` parses the first columns by index and ignores the rest.
 
 ## PC attitude viewer
 
@@ -133,3 +145,13 @@ Same 18-column `ATT` format as the MPU6050 project:
 
 Gyro bias calibration adds a 100 ms settle before sampling, avoiding the startup
 transient seen in the MPU6050 build.
+
+## I2C bus recovery
+
+The board's I2C wiring is dupont leads, and moving the board can disturb SDA/SCL. The
+ESP-IDF i2c driver then stops its state machine after a failed bus clear, and every
+later transaction returns `ESP_ERR_INVALID_STATE` — IMU, magnetometer and OLED all stay
+dead until a reboot. `app_i2c_bus_recover()` (`main/att_i2c_bus.c`) resets the bus
+(9 SCL clocks + FSM reset); the main loop calls it after 5 consecutive read failures and
+then every 0.5 s until reads succeed, logging `I2C 总线已复位`. If it keeps failing the
+log says the lines are really held low, which is a wiring/power problem.

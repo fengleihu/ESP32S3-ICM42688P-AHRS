@@ -31,8 +31,11 @@
   1. 静态：平台上的 yaw σ（去趋势残差）、yaw 漂移（°/min）、|yaw − 磁航向|
   2. 倾斜：两个相邻平台倾斜差 20~45° 时，yaw 变化应 < 2°
   3. 180°：相邻平台 |Δyaw| 在 180 ± 15° 内时，偏差应 ≤ 5°
-  4. 表格里的 |B| 与 |B| 起伏是旁证（平台内板子不动，起伏主要反映噪声，
-     不单独判 PASS/FAIL）
+  4. 磁一致性：同一段里"磁航向变化"和"陀螺 Z 轴积分"应一致（默认差 ≤2°）。
+     差得多说明板子其实没转，是磁侧在变 —— 磁畸变或倾斜补偿误差。这一项需要
+     固件输出 ATT 的第 19~21 列（三轴角速度）；老固件的日志会自动跳过。
+  5. 表格里的 |B| 与 |B| 起伏是旁证（平台内板子不动，起伏主要反映噪声，
+     不单独判 PASS/FAIL）；但跨平台 |B| 相差 >2% 会提示测过程中磁场环境变了。
 
 退出码：0 = 全部可判定的项通过；1 = 有失败项；2 = 没有足够的平台可判定。
 """
@@ -54,6 +57,7 @@ C_AX, C_AY, C_AZ = 7, 8, 9
 C_FRESH, C_HDG_VALID, C_HDG = 10, 11, 12
 C_CAL_MX, C_CAL_MY, C_CAL_MZ = 13, 14, 15
 C_RAW_MX, C_RAW_MY, C_RAW_MZ = 16, 17, 18
+C_GX, C_GY, C_GZ = 19, 20, 21  # 可选：固件新增的三轴角速度（°/s）
 
 # 值得回填 HANDOFF 的固件日志行
 LOG_HIGHLIGHTS = (
@@ -126,14 +130,23 @@ def linfit(xs, ys):
 # 日志解析
 # --------------------------------------------------------------------------
 def parse_log(path):
-    """返回 (rows, marks, highlights)。
+    """返回 (rows, marks, highlights, reboot_ts)。
 
     rows: dict 列表（ms/t/roll/pitch/yaw/...）
     marks: (t_seconds, label) 列表，按时间排序
     highlights: 含关键字的固件日志行
+    reboot_ts: 检测到的重启时刻（t，秒）
+
+    ATT 的时间列是 esp_timer 的毫秒数，**重启后会归零**。日志里跨一次重启
+    （比如 RECAL_MAG 那次）就会出现时间倒退，稳定平台检测会直接失效
+    （第一版实测输出 -83.0 s）。这里给重启后的时间加一个偏移，让它继续
+    单调递增；偏移里补 1.5 s 作为重启耗时，只影响绝对时刻，不影响段内分析。
     """
     rows, marks, highlights = [], [], []
     t0 = None
+    prev_ms = None
+    offset_ms = 0
+    reboot_ts = []
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         for raw in fh:
             line = raw.rstrip("\r\n")
@@ -150,7 +163,11 @@ def parse_log(path):
                     continue
                 if t0 is None:
                     t0 = ms
-                row["t"] = (ms - t0) / 1000.0
+                if prev_ms is not None and ms < prev_ms:
+                    offset_ms += prev_ms - ms + 1500
+                    reboot_ts.append((ms + offset_ms - t0) / 1000.0)
+                prev_ms = ms
+                row["t"] = (ms + offset_ms - t0) / 1000.0
                 rows.append(row)
             elif line.startswith("MARK,"):
                 parts = line.split(",", 2)
@@ -160,12 +177,12 @@ def parse_log(path):
                     except ValueError:
                         continue
                     label = parts[2].strip() if len(parts) > 2 else "mark"
-                    marks.append(((ms - t0) / 1000.0 if t0 is not None else 0.0,
-                                  label))
+                    marks.append(((ms + offset_ms - t0) / 1000.0
+                                  if t0 is not None else 0.0, label))
             elif any(k in line for k in LOG_HIGHLIGHTS):
                 highlights.append(line)
     marks.sort(key=lambda m: m[0])
-    return rows, marks, highlights
+    return rows, marks, highlights, reboot_ts
 
 
 def tilt_deg(row) -> float:
@@ -180,6 +197,23 @@ def tilt_deg(row) -> float:
 
 def bmag(row) -> float:
     return math.sqrt(row[C_CAL_MX] ** 2 + row[C_CAL_MY] ** 2 + row[C_CAL_MZ] ** 2)
+
+
+def has_gyro(rows) -> bool:
+    return bool(rows) and C_GZ in rows[0]
+
+
+def cum_gyro_z(rows):
+    """陀螺 Z 轴的累计角度（度），用来给航向变化做独立参考。
+
+    为什么需要：只看 yaw/磁航向分不清"人真的把板子转了"和"磁航向被倾斜
+    补偿算歪了"。陀螺在这几秒内的积分是独立于磁的：两者对不上，问题就在磁侧。
+    """
+    cum = [0.0] * len(rows)
+    for i in range(1, len(rows)):
+        dt = rows[i]["t"] - rows[i - 1]["t"]
+        cum[i] = cum[i - 1] + 0.5 * (rows[i][C_GZ] + rows[i - 1][C_GZ]) * dt
+    return cum
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +287,35 @@ def find_plateaus(rows):
     return [(a, b) for a, b in runs if ts[b] - ts[a] >= MIN_PLATEAU_S]
 
 
+def world_field(row):
+    """机体坐标系磁场旋到世界系（只用加速度计的 roll/pitch）。
+
+    磁倾角 dip 是**与姿态无关的不变量**：板子在同一地点无论怎么倾斜，dip 都
+    应该一样。所以 dip 随倾斜变化就是"轴映射/软磁/倾斜补偿"有问题的直接证据，
+    而且它不需要知道板子的真实朝向 —— 比"倾斜 30° 看 yaw 变多少"更抗干扰。
+    """
+    ax, ay, az = row[C_AX], row[C_AY], row[C_AZ]
+    n = math.sqrt(ax * ax + ay * ay + az * az)
+    if n < 1e-6:
+        return None
+    ax, ay, az = ax / n, ay / n, az / n
+    pitch = math.asin(max(-1.0, min(1.0, -ax)))
+    roll = math.atan2(ay, az)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    x, y, z = row[C_CAL_MX], row[C_CAL_MY], row[C_CAL_MZ]
+    y1 = cr * y - sr * z
+    z1 = sr * y + cr * z
+    return (cp * x + sp * z1, y1, -sp * x + cp * z1)
+
+
+def dip_deg(row):
+    w = world_field(row)
+    if not w:
+        return float("nan")
+    return math.degrees(math.atan2(w[2], math.hypot(w[0], w[1])))
+
+
 def plateau_stats(rows, i0, i1):
     sub = rows[i0:i1 + 1]
     ts = [r["t"] for r in sub]
@@ -266,10 +329,15 @@ def plateau_stats(rows, i0, i1):
         sigma = rms
     hdgs = [r[C_HDG] for r in sub if r[C_HDG_VALID] > 0.5]
     bs = [bmag(r) for r in sub]
+    dips = [dip_deg(r) for r in sub]
+    dips = [d for d in dips if not math.isnan(d)]
     diffs = [wrap180(r[C_YAW] - r[C_HDG]) for r in sub if r[C_HDG_VALID] > 0.5]
     return {
+        "i0": i0,
+        "i1": i1,
         "t0": ts[0],
         "t1": ts[-1],
+        "mid": (i0 + i1) // 2,
         "dur": ts[-1] - ts[0],
         "n": len(sub),
         "roll": statistics.fmean(r[C_ROLL] for r in sub),
@@ -281,6 +349,7 @@ def plateau_stats(rows, i0, i1):
         "hdg": circ_mean_deg(hdgs) if hdgs else float("nan"),
         "yaw_minus_hdg": statistics.fmean(diffs) if diffs else float("nan"),
         "bmean": statistics.fmean(bs),
+        "dip": statistics.fmean(dips) if dips else float("nan"),
         "bscale": statistics.pstdev(bs) / statistics.fmean(bs) * 100.0
         if statistics.fmean(bs) > 1e-6 else 0.0,
         "mag_frac": sum(1 for r in sub if r[C_MAG_CAL] > 0.5) / len(sub),
@@ -316,8 +385,31 @@ def fmt(x, nd=2, sign=False):
     return f"{x:+.{nd}f}" if sign else f"{x:.{nd}f}"
 
 
+def trim_settle(rows, i0, i1, windows):
+    """把平台开头落在"重启后的静默窗口"里的部分剪掉。
+
+    为什么需要：RECAL_MAG 之后板子会重启并重新做初始对准，而人往往还在
+    扶着板子；重启后头 20~30 s 的 yaw 会明显爬行（实测 3.4° 在 15 s 内），
+    这段算进 σ 会让一个校准良好的系统看起来完全不达标（实测 σ 0.53° 对
+    0.5° 门限）。窗口长度用 --settle 调，默认 30 s。
+    """
+    moved = True
+    while moved:
+        moved = False
+        for s0, s1 in windows:
+            if rows[i1]["t"] <= s0 or rows[i0]["t"] >= s1:
+                continue
+            j = i0
+            while j <= i1 and rows[j]["t"] < s1:
+                j += 1
+            if j > i0:
+                i0 = j
+                moved = True
+    return i0, i1
+
+
 def analyze_file(path, args):
-    rows, marks, highlights = parse_log(path)
+    rows, marks, highlights, reboot_ts = parse_log(path)
     print("=" * 82)
     print(f"文件: {path}")
     if not rows:
@@ -326,7 +418,7 @@ def analyze_file(path, args):
 
     total = rows[-1]["t"] - rows[0]["t"]
     print(f"  ATT {len(rows)} 行，{total:.1f} s（{len(rows) / max(total, 1e-3):.1f} Hz），"
-          f"MARK {len(marks)} 个")
+          f"MARK {len(marks)} 个，重启 {len(reboot_ts)} 次")
     if marks:
         print("  标记: " + "  ".join(f"{t:.1f}s={l}" for t, l in marks))
     mag_frac = sum(1 for r in rows if r[C_MAG_CAL] > 0.5) / len(rows)
@@ -341,28 +433,66 @@ def analyze_file(path, args):
         print("  没有找到稳定平台：整段都在动，或者日志太短（<2.5 s）")
         return None
 
+    windows = [(rt, rt + args.settle) for rt in reboot_ts]
+    if windows:
+        print(f"  重启后的前 {args.settle:.0f} s 视为滤波收敛期，不计入静态指标")
+
     stats = []
+    skipped = 0
     for a, b in plateaus:
-        st = plateau_stats(rows, a, b)
+        a2, b2 = trim_settle(rows, a, b, windows)
+        if b2 <= a2 or rows[b2]["t"] - rows[a2]["t"] < MIN_PLATEAU_S:
+            skipped += 1
+            continue
+        st = plateau_stats(rows, a2, b2)
         st["label"] = label_for(marks, st["t0"], st["t1"])
         stats.append(st)
 
+    if skipped:
+        print(f"  有 {skipped} 个平台整段落在收敛窗口内，已跳过")
+    if not stats:
+        print("  没有可用的稳定平台")
+        return None
+
+    # ---- 环境一致性：|B| 或 dip 与中位数差太多，说明这段数据搬了位置/被遮挡 ----
+    bvals = [st["bmean"] for st in stats if st["bmean"] > 1e-6]
+    dipvals = [st["dip"] for st in stats if not math.isnan(st["dip"])]
+    b_med = statistics.median(bvals) if bvals else 0.0
+    dip_med = statistics.median(dipvals) if dipvals else 0.0
+    for st in stats:
+        st["env_out"] = False
+        if b_med > 1e-6 and abs(st["bmean"] - b_med) / b_med > args.max_b_drift:
+            st["env_out"] = True
+        if dipvals and abs(st["dip"] - dip_med) > args.max_dip_drift:
+            st["env_out"] = True
+
     print(f"\n== 稳定平台（变化率 ≤{STEADY_RATE_DPS}°/s，长度 ≥{MIN_PLATEAU_S}s）==")
     head = ("#", "标签", "起点s", "时长s", "roll", "pitch", "yaw", "倾斜°",
-            "σ°", "漂移°/min", "yaw−磁航向°", "|B|µT", "|B|起伏%")
-    print(("{:<3}{:<13}{:>8}" + "{:>9}" * 10).format(*head))
+            "σ°", "漂移°/min", "yaw−磁航向°", "dip°", "|B|µT", "|B|起伏%")
+    print(("{:<3}{:<13}{:>8}" + "{:>9}" * 11).format(*head))
     for k, st in enumerate(stats):
-        print(("{:<3}{:<13}{:>8}" + "{:>9}" * 10).format(
-            k, st["label"][:12], fmt(st["t0"], 1), fmt(st["dur"], 1),
-            fmt(st["roll"], 1), fmt(st["pitch"], 1), fmt(st["yaw"], 1),
-            fmt(st["tilt"], 1), fmt(st["sigma"], 3), fmt(st["drift"], 2, True),
-            fmt(st["yaw_minus_hdg"], 2, True), fmt(st["bmean"], 1),
-            fmt(st["bscale"], 1)))
+        print(("{:<3}{:<13}{:>8}" + "{:>9}" * 11).format(
+            k, (st["label"] + ("!" if st["env_out"] else ""))[:12],
+            fmt(st["t0"], 1), fmt(st["dur"], 1), fmt(st["roll"], 1),
+            fmt(st["pitch"], 1), fmt(st["yaw"], 1), fmt(st["tilt"], 1),
+            fmt(st["sigma"], 3), fmt(st["drift"], 2, True),
+            fmt(st["yaw_minus_hdg"], 2, True), fmt(st["dip"], 1),
+            fmt(st["bmean"], 1), fmt(st["bscale"], 1)))
+    print(f"  dip 是中纬度磁场的不变量，同一地点在不同倾斜下应保持一致；"
+          f"中位数 {dip_med:.1f}°")
+    env_bad = [st for st in stats if st["env_out"]]
+    if env_bad:
+        print(f"  ! 带 ! 的 {len(env_bad)} 个平台 |B| 或 dip 偏离中位数"
+              f"（> {args.max_b_drift * 100:.0f}% / {args.max_dip_drift:.1f}°）："
+              f"该段磁场环境与其它段不同（换位置、靠近金属或被手遮挡），"
+              f"不参与判据。dip 展开 = "
+              + ", ".join(f"{st['dip']:.1f}°" for st in stats))
 
     checks = []
 
-    # ---- 静态判据：取各平台上最差的（只算足够的时长）----
-    static = [st for st in stats if st["dur"] >= 5.0 and st["mag_frac"] > 0.5]
+    # ---- 静态判据：取各平台上最差的（只算足够的时长、环境一致）----
+    static = [st for st in stats
+              if st["dur"] >= 5.0 and st["mag_frac"] > 0.5 and not st["env_out"]]
     if static:
         worst_sigma = max(static, key=lambda s: s["sigma"])
         worst_hdg = max(static, key=lambda s: abs(s["yaw_minus_hdg"])
@@ -380,9 +510,15 @@ def analyze_file(path, args):
 
     # ---- 相邻平台之间的变化 ----
     if len(stats) >= 2:
+        gyro = has_gyro(rows)
+        cum = cum_gyro_z(rows) if gyro else None
         print("\n== 相邻平台变化 ==")
-        print("{:<16}->{:<16}{:>9}{:>9}{:>9}{:>9}".format(
-            "从", "到", "Δroll", "Δpitch", "Δyaw", "Δ倾斜"))
+        if gyro:
+            print("{:<14}->{:<14}{:>8}{:>8}{:>8}{:>8}{:>10}".format(
+                "从", "到", "Δroll", "Δpitch", "Δyaw", "Δ倾斜", "Δyaw陀螺"))
+        else:
+            print("{:<16}->{:<16}{:>9}{:>9}{:>9}{:>9}".format(
+                "从", "到", "Δroll", "Δpitch", "Δyaw", "Δ倾斜"))
         pairs = []
         for i in range(len(stats) - 1):
             a, b = stats[i], stats[i + 1]
@@ -392,27 +528,74 @@ def analyze_file(path, args):
                 "d_pitch": b["pitch"] - a["pitch"],
                 "d_yaw": wrap180(b["yaw"] - a["yaw"]),
                 "d_tilt": b["tilt"] - a["tilt"],
+                "usable": not (a["env_out"] or b["env_out"]),
+                # 只在"上一段结束 → 下一段开始"这段运动区间里积分陀螺：
+                # 窗口越短，残余零偏（0.01~0.02°/s）累积得越少
+                "d_yaw_gyro": (cum[b["i0"]] - cum[a["i1"]]) if gyro else None,
             }
             pairs.append(p)
-            print("{:<16}->{:<16}{:>+9.1f}{:>+9.1f}{:>+9.1f}{:>+9.1f}".format(
-                p["a"][:15], p["b"][:15], p["d_roll"], p["d_pitch"], p["d_yaw"],
-                p["d_tilt"]))
-        print("  （符号约定与固件一致；Δyaw 已做 ±180° 解缠绕）")
+            note = "" if p["usable"] else "   （环境不一致，跳过）"
+            if gyro:
+                print("{:<14}->{:<14}{:>+8.1f}{:>+8.1f}{:>+8.1f}{:>+8.1f}{:>+10.1f}"
+                      .format(p["a"][:13], p["b"][:13], p["d_roll"],
+                              p["d_pitch"], p["d_yaw"], p["d_tilt"],
+                              p["d_yaw_gyro"]) + note)
+            else:
+                print("{:<16}->{:<16}{:>+9.1f}{:>+9.1f}{:>+9.1f}{:>+9.1f}".format(
+                    p["a"][:15], p["b"][:15], p["d_roll"], p["d_pitch"],
+                    p["d_yaw"], p["d_tilt"]) + note)
+        print("  （Δyaw 已做 ±180° 解缠绕；Δyaw陀螺 = 两段之间陀螺 Z 轴积分，"
+              "独立于磁，用来扣掉人手实际转过的角度）")
 
-        tilt_pairs = [p for p in pairs if 20.0 <= abs(p["d_tilt"]) <= 45.0]
+        if gyro:
+            for p in pairs:
+                if not p["usable"] or p["d_yaw_gyro"] is None:
+                    continue
+                gap = wrap180(p["d_yaw"] - p["d_yaw_gyro"])
+                if abs(gap) > args.max_mag_gap:
+                    print(f"  ! {p['a']}->{p['b']}: 磁航向变化 {p['d_yaw']:+.1f}° vs "
+                          f"陀螺积分 {p['d_yaw_gyro']:+.1f}°，差 {gap:+.1f}° —— "
+                          f"板子实际只转了 {p['d_yaw_gyro']:+.1f}°，多出来的部分是"
+                          f"磁侧（畸变或倾斜补偿误差）")
+            usable_gaps = [abs(wrap180(p["d_yaw"] - p["d_yaw_gyro"]))
+                           for p in pairs if p["usable"] and p["d_yaw_gyro"] is not None]
+            if usable_gaps:
+                checks.append(("磁航向 vs 陀螺积分的最大偏差", max(usable_gaps),
+                               args.max_mag_gap, "°", "任一对可用平台"))
+
+        tilt_pairs = [p for p in pairs if p["usable"]
+                      and 20.0 <= abs(p["d_tilt"]) <= 45.0]
         if tilt_pairs:
-            worst = max(tilt_pairs, key=lambda p: abs(p["d_yaw"]))
-            checks.append((f"倾斜 {abs(worst['d_tilt']):.0f}° 时 yaw 变化",
-                           abs(worst["d_yaw"]), args.max_tilt_yaw, "°",
-                           f"{worst['a']}->{worst['b']}"))
-        turn_pairs = [p for p in pairs
-                      if abs(p["d_tilt"]) <= 8.0 and
-                      abs(abs(p["d_yaw"]) - 180.0) <= 15.0]
+            if gyro:
+                worst = max(tilt_pairs,
+                            key=lambda p: abs(wrap180(p["d_yaw"] - p["d_yaw_gyro"])))
+                err = abs(wrap180(worst["d_yaw"] - worst["d_yaw_gyro"]))
+                checks.append((f"倾斜 {abs(worst['d_tilt']):.0f}° 时磁航向误差"
+                               f"（已扣除实际转动 {worst['d_yaw_gyro']:+.1f}°）",
+                               err, args.max_tilt_yaw, "°",
+                               f"{worst['a']}->{worst['b']}"))
+            else:
+                worst = max(tilt_pairs, key=lambda p: abs(p["d_yaw"]))
+                checks.append((f"倾斜 {abs(worst['d_tilt']):.0f}° 时 yaw 变化",
+                               abs(worst["d_yaw"]), args.max_tilt_yaw, "°",
+                               f"{worst['a']}->{worst['b']}"))
+
+        turn_pairs = [p for p in pairs if p["usable"]
+                      and abs(p["d_tilt"]) <= 8.0
+                      and abs(p["d_yaw_gyro"] if gyro else p["d_yaw"]) >= 120.0]
         if turn_pairs:
-            worst = max(turn_pairs, key=lambda p: abs(abs(p["d_yaw"]) - 180.0))
-            checks.append((f"180° 转身偏差（实测 {worst['d_yaw']:+.1f}°）",
-                           abs(abs(worst["d_yaw"]) - 180.0), args.max_turn_err, "°",
-                           f"{worst['a']}->{worst['b']}"))
+            if gyro:
+                worst = max(turn_pairs,
+                            key=lambda p: abs(wrap180(p["d_yaw"] - p["d_yaw_gyro"])))
+                err = abs(wrap180(worst["d_yaw"] - worst["d_yaw_gyro"]))
+                checks.append((f"转身 {abs(worst['d_yaw_gyro']):.0f}°（陀螺实测）时"
+                               f"磁航向误差", err, args.max_turn_err, "°",
+                               f"{worst['a']}->{worst['b']}"))
+            else:
+                err = abs(abs(turn_pairs[0]["d_yaw"]) - 180.0)
+                checks.append((f"180° 转身偏差（实测 {turn_pairs[0]['d_yaw']:+.1f}°）",
+                               err, args.max_turn_err, "°",
+                               f"{turn_pairs[0]['a']}->{turn_pairs[0]['b']}"))
 
     if not checks:
         print("\n没有可判定的项：需要至少一个 ≥5 s 的静态平台，"
@@ -452,6 +635,14 @@ def main():
     ana.add_argument("--max-hdg", type=float, default=1.0)
     ana.add_argument("--max-tilt-yaw", type=float, default=2.0)
     ana.add_argument("--max-turn-err", type=float, default=5.0)
+    ana.add_argument("--max-mag-gap", type=float, default=2.0,
+                     help="磁航向变化与陀螺积分的允许偏差（超了说明问题在磁侧）")
+    ana.add_argument("--max-b-drift", type=float, default=0.02,
+                     help="各平台 |B| 相对中位数允许偏离多少（比例，默认 2%%）")
+    ana.add_argument("--max-dip-drift", type=float, default=2.0,
+                     help="各平台磁倾角相对中位数允许偏离多少度")
+    ana.add_argument("--settle", type=float, default=30.0,
+                     help="重启后多少秒内的数据不计入静态指标（滤波收敛期）")
 
     args = ap.parse_args()
     try:

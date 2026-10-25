@@ -21,6 +21,19 @@ esp_err_t app_i2c_bus_init(void);
 /** 取总线句柄；未初始化返回 NULL */
 i2c_master_bus_handle_t app_i2c_bus_get(void);
 
+/**
+ * 总线锁死后的恢复：发 9 个 SCL 时钟把被从机拉住的 SDA 释放，并复位驱动状态机。
+ *
+ * 为什么必须有：ESP-IDF 的 i2c 驱动在"清总线"失败后会停掉状态机，之后每次
+ * 调用都直接返回 ESP_ERR_INVALID_STATE，不主动复位就永远恢复不了 —— 实测在
+ * 板子被手拿着移动时（杜邦线抖动）出现过一次，之后 OLED、IMU、磁力计全部失效
+ * 直到重启，整段测量作废。
+ *
+ * @return ESP_OK 恢复成功；ESP_ERR_INVALID_STATE 表示时钟拉不动 SDA
+ *         （真的短路/断线/没供电，需要人工检查接线）
+ */
+esp_err_t app_i2c_bus_recover(void);
+
 /** 扫描 0x08~0x77，把应答的地址打到日志，返回应答个数 */
 int app_i2c_scan(void);
 

@@ -48,6 +48,21 @@ i2c_master_bus_handle_t app_i2c_bus_get(void)
     return s_inited ? s_bus : NULL;
 }
 
+esp_err_t app_i2c_bus_recover(void)
+{
+    if (!s_inited || s_bus == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = i2c_master_bus_reset(s_bus);
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "I2C 总线已复位（从总线锁死中恢复）");
+    } else {
+        ESP_LOGE(TAG, "I2C 总线复位失败：%s —— SDA/SCL 可能被拉低或断了，"
+                      "检查接线与 3V3 供电", esp_err_to_name(err));
+    }
+    return err;
+}
+
 int app_i2c_scan(void)
 {
     if (!s_inited) {

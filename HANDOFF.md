@@ -143,11 +143,13 @@ The min-max number is a stress case (6 % cross-axis coupling); the point is not 
 real hardware is that bad, but that the old model has a systematic gap that can flip
 heading when the horizontal component gets small.
 
-## Four-criteria measurement (still to run on hardware)
+## Four-criteria measurement
 
 Everything below runs on the PC; the only manual part is moving the board.
 
-1. Clean location: no laptop, speaker, PSU or metal within ~0.5 m. Board level and
+### Procedure
+
+1. Clean location: no laptop, speaker, PSU or metal within ~1 m. Board level and
    still for the gyro bias window.
    The board's USB-Serial-JTAG enumerates as **COM3** on this machine (it moves if you
    use another USB port); check with
@@ -159,22 +161,38 @@ Everything below runs on the PC; the only manual part is moving the board.
    Type `RECAL_MAG` and press Enter. The board reboots, gyro-calibrates, then asks for
    the 15 s rotation; rotate slowly through all orientations (all three axes must
    swing, `画 8 字`). Look for
-   `校准完成（椭球拟合）：样本 N（拟合 M，剔除 K） offset=[...] 半径=... 残差=...% 覆盖度=...`
+   `校准完成（椭球拟合）：喂入 N 个样本，存 M，拟合用 U（剔除 K） offset=[...] 半径=... 残差=...% 覆盖度=...`
    and `Mag calibration OK: samples=... method=椭球拟合 quality=... radius=...`.
-3. Four criteria in one recording, marking each steady state with `MARK`:
+3. Four criteria in one recording (typing `MARK <label>` while it records is optional,
+   the analyzer does not need it):
    ```
-   python tools/att_report.py record --port COM3 --seconds 90 --out logs/criteria.log
+   python tools/att_report.py record --port COM3 --seconds 200 --out logs/criteria.log
    ```
-   then, in order: board level → `MARK level`; tilt ~30 deg and hold → `MARK tilt30`;
-   back to level → `MARK level2`; rotate 180 deg about the vertical axis and hold →
-   `MARK turn180`. Marks do not need to be precisely timed: the analyzer finds steady
-   plateaus itself and only compares plateau means.
+   then: board level and hands off → tilt ~30 deg (prop one edge on a book so the hand
+   is away) → back to level → rotate 180 deg **without changing the board's position**
+   (turn it on a sheet of paper) → hands off.
 4. Judge:
    ```
    python tools/att_report.py analyze logs/*.log
    ```
-   Exit code 0 = all criteria pass. The tool prints the plateau table, the
-   plateau-to-plateau deltas and a PASS/FAIL block with the measured numbers.
+   Exit code 0 = all criteria pass.
+
+### How the tool judges (it changed twice for a reason)
+
+- Segmenting by `MARK` alone was not enough: marks cannot be timed well enough, and any
+  recording that contains a reboot breaks the `ATT` millisecond column (it restarts at
+  0). The analyzer now finds steady plateaus from the data (±0.6 s least-squares slope),
+  ignores the 30 s after a reboot, and stitches reboots with a time offset.
+- Plateaus whose \|B\| or dip differs from the others are flagged (`!`) as a different
+  magnetic environment and excluded — otherwise a magnetic disturbance reads as a
+  heading change.
+- `ATT` columns 19..21 are the gyro (deg/s). `Δyaw陀螺` is the Z-gyro integral between
+  two plateaus, i.e. how much the board *actually* turned. Judging
+  `|Δyaw_mag − Δyaw_gyro|` separates "the operator twisted the board" from "the
+  magnetic side is wrong"; the raw `Δyaw` cannot. Without those columns the tool falls
+  back to the old absolute checks.
+- `dip` (magnetic inclination computed from the accelerometer-tilted field) is an
+  invariant of the location and must not change with tilt.
 
 Checks implemented (thresholds are CLI options):
 
@@ -183,25 +201,60 @@ Checks implemented (thresholds are CLI options):
 | 1 | static yaw σ (detrended) | ≤ 0.5 deg |
 | 2 | yaw drift | ≤ 2.0 deg/min |
 | 3 | \|yaw − magnetic heading\| | ≤ 1.0 deg |
-| 4 | yaw change while tilting 20..45 deg | ≤ 2.0 deg |
-| 5 | 180 deg turn error | ≤ 5.0 deg |
+| 4 | tilt 20..45 deg: \|Δyaw_mag − Δyaw_gyro\| | ≤ 2.0 deg |
+| 5 | turn ≥ 120 deg: \|Δyaw_mag − Δyaw_gyro\| | ≤ 5.0 deg |
+| 6 | mag heading vs gyro integral, any pair | ≤ 2.0 deg |
 
-### Results (to fill after the session)
+### Results (2026-10-25, ellipsoid calibration, desk ~0.5-1 m from a laptop)
+
+```
+I (17080) mag: 校准完成（椭球拟合）：喂入 358 个样本，存 358，拟合用 332（剔除 26）
+              offset=[-28.7, 18.8, 83.8] µT 半径=49.9 µT 残差=0.94% 覆盖度=0.87
+```
 
 | Item | Criterion | Measured | Verdict |
 |---|---|---|---|
-| Magnetic calibration | residual, coverage, radius | pending | pending |
-| Static | yaw σ | pending | pending |
-| Static | drift | pending | pending |
-| Static | \|yaw − mag heading\| | pending | pending |
-| Tilt 30 deg | yaw change | pending | pending |
-| 180 deg turn | \|Δyaw − 180\| | pending | pending |
+| Magnetic calibration | residual / coverage / radius | 0.94 % / 0.87 / 49.9 µT | pass |
+| Static σ, 132 s (`cal.log`) | ≤ 0.5 deg | **0.092 deg** | pass |
+| Static σ, 46 s (criteria run) | ≤ 0.5 deg | **0.123 deg** | pass |
+| Drift | ≤ 2 deg/min | **−0.11 / +0.22 deg/min** | pass |
+| \|yaw − mag heading\| | ≤ 1 deg | **0.07 / 0.23 deg** | pass |
+| Tilt 31 deg (gyro-corrected) | ≤ 2 deg | **3.6 deg** | **fail** |
+| 180 deg turn | ≤ 5 deg | not measured — the post-turn plateau sat in a different field (\|B\| 47.7 vs 49.1 µT, dip −57.9° vs −52.5°) and was excluded | n/a |
 
-The analyzer is itself regression-tested against a fixture with known answers
-(`tools/host_test/make_test_log.py`): the "good" log passes all five checks, the
-`--bad` log (σ 1.6 deg, 12 deg tilt-induced yaw error, 174 deg turn) fails three.
+### What the numbers say
 
-### Hardware run 2026-10-25 (desk, not a clean location)
+- The ellipsoid calibration fixed the old weakness: \|B\| now stays at the stored radius
+  (49.9 µT) instead of wandering between 45 and 57 µT.
+- Static behaviour is excellent and repeatable: σ 0.09-0.12°, drift ~0.2 deg/min,
+  yaw vs magnetic heading 0.07-0.23°.
+- Tilt: going into the 30° tilt the heading error is **0.0°** — the measured Δyaw was
+  +10.8° and the gyro integral was +10.8°, i.e. the operator genuinely twisted the board
+  while tilting. Coming back out of the tilt the heading was **3.6°** off with **0.0°**
+  of gyro rotation, so 3.6° is a real tilt-induced heading error, above the 2° limit.
+- Most likely cause, in order:
+  1. **The accelerometer is not calibrated.** The level reading is
+     `ax=+14 mg, ay=−14 mg, az=1010 mg` → ~0.8° of roll/pitch bias and a 1 % scale
+     error. A tilt error θ rotates the compensated heading by roughly θ·tan(dip); with
+     dip ≈ 54°, 1.6° of tilt error already gives ~2.2°.
+  2. Soft-iron residual: dip shifts 2° between level (−54.0°) and 30° tilt (−52.0°);
+     the fit residual is 0.94 %, so a small residual is expected.
+  3. A small mag-vs-accel mounting skew (1-2°) that the 24-entry axis map cannot
+     represent.
+- The turn must be redone in a stable field. Rotating the board by hand moved it into
+  a different field (dip changed 5.4°), which is a measurement problem, not a firmware
+  one.
+
+### Next steps
+
+1. Redo only the turn, keeping the board in the same spot (rotate it on a sheet of
+   paper); 1-2 minutes.
+2. Then attack the 3.6° tilt error. The single most promising change is a proper
+   accelerometer calibration (zero-g offset + scale, 6-face), because the level reading
+   already shows ~0.8° of bias. Second step would be estimating a small accel-vs-mag
+   mounting rotation.
+
+### First boot after the calibration change (2026-10-25)
 
 The new firmware was built, flashed to the board (COM3, USB-Serial-JTAG) and booted:
 
@@ -222,10 +275,7 @@ CMD_READY,RECAL_MAG
   enables (checked in `pc_viewer/index.html`, which compares the line exactly);
 - one 23 s static capture analysed with `tools/att_report.py`: yaw σ 0.055 deg, drift
   1.46 deg/min, \|yaw − mag heading\| 0.11 deg, all PASS — but \|B\| = 49.6 µT against
-  the stored radius 45.8 µT, i.e. the old min-max calibration is indeed the weak link.
-
-Nothing here replaces the clean-location session: the desk is full of magnetic
-distortion, so the recalibration and the four criteria are still pending.
+  the stored radius 45.8 µT, i.e. the old min-max calibration was indeed the weak link.
 
 ## ICM-42688-P migration and bring-up (2026-10-24)
 
@@ -256,8 +306,7 @@ Static measurement (30 s, board level and still):
 - calibrated field magnitude `57.4 uT` against the stored radius `45.8 uT`
   (position dependent, same behaviour as the MPU6050 build).
 
-Pending: tilt (~30 deg) and edge-aligned 180 deg dynamic checks, to be recorded after
-the next measurement session. See *Four-criteria measurement* above for the exact
-commands; the ellipsoid-fit recalibration should be redone in the same clean location
-first, because that stored radius (45.8 uT, min-max era) is what produced the 57.4 uT
-mismatch.
+Superseded by the ellipsoid-fit recalibration and the measurements in *Four-criteria
+measurement* above: the stored radius is now fitted (49.9 uT) instead of min-max
+(45.8 uT), the tilt check measures 3.6 deg, and only the 180 deg turn still needs a run
+in a stable field.
