@@ -225,38 +225,39 @@ Last run was done with the button console (`tools/att_gui.py`, marks at 3.9 s / 
 | Item | Criterion | Measured | Verdict |
 |---|---|---|---|
 | Magnetic calibration | residual / coverage / radius | 0.94 % / 0.87 / 49.9 µT | pass |
-| Static σ | ≤ 0.5 deg | 0.092 (`cal.log`, 132 s) / 0.123 / **0.23** (console run) | pass |
+| Static σ | ≤ 0.5 deg | 0.092 (`cal.log`, 132 s) / 0.123 / 0.23 (console run) | pass |
 | Drift | ≤ 2 deg/min | −0.11 / +0.22 deg/min (long static segments only) | pass |
-| \|yaw − mag heading\| | ≤ 1 deg | 0.07 / 0.23 / **0.74** (console run) | pass |
-| Tilt 30 deg, gyro-corrected | ≤ 2 deg | **1.31 deg** (console run) / 3.6 deg (earlier run) | pass (borderline) |
-| 180 deg turn, gyro-corrected | ≤ 5 deg | **0.08 deg** — raw Δyaw −179.6° vs gyro +180.3° | pass |
-| Mag heading vs gyro, worst pair | ≤ 2 deg | **1.31 deg** | pass |
+| \|yaw − mag heading\| | ≤ 1 deg | 0.07 / 0.23 / 0.74 (console run) | pass |
+| Tilt 28-31 deg | ≤ 2 deg | 1.89 (console run) / 2.55 (earlier run) with the heading-rate reference; 1.31 / 3.6 with the older GZ-only reference | borderline |
+| Turn 168-180 deg | ≤ 5 deg | 0.08 with the GZ-only reference, 12.9 with the heading-rate reference on the same data | **method-dependent — see below** |
+
+**Measurement limit (found 2026-10-25, important):** the gyro reference itself is only
+good to ~1-2° for hand-held motion. Integrating GZ alone is wrong once the board tilts
+(7.0° instead of 3.6° during a 30° attitude change), and the corrected heading-rate
+`ψ̇ = (q·sinφ + r·cosφ)/cosθ` needs accurate roll/pitch *during* the motion, which the
+accelerometer cannot give while the board is accelerated by hand. The same turn therefore
+reads 0.08° or 12.9° depending on the integration used. Conclusion: a 1-2° tilt error
+cannot be resolved by this method; it needs a rigid fixture and a clean field, or an
+independent reference (turntable). The static and mag-vs-yaw numbers do not have this
+problem and are trustworthy.
 
 ### What the numbers say
 
 - The ellipsoid calibration fixed the old weakness: \|B\| now stays at the stored radius
-  (49.9 µT) instead of wandering between 45 and 57 µT.
+  instead of wandering between 45 and 57 µT, and the residual is 0.94 %.
 - Static behaviour is excellent and repeatable: σ 0.09-0.23°, drift ~0.2 deg/min,
   yaw vs magnetic heading 0.07-0.74°.
-- Turn: the board really turned 180.3° (gyro) and the AHRS reported 179.6°, i.e. 0.08°
-  of heading error over the whole turn. This is the strongest single result of the run.
-- Tilt: 1.31° in the console run, 3.6° in the run before it. Both are gyro-corrected, so
-  the difference is the environment: the two runs sat in different fields
-  (\|B\| 44.9 / dip −58.8° vs \|B\| 49.1 / dip −54.0°), and a local distortion biases the
-  tilted heading. The 2° limit is met in the cleaner spot and missed in the other, so
-  treat the tilt result as 1.3-3.6° depending on where the board sits.
-- Likely contributors to the remaining tilt error, in order:
-  1. **The accelerometer is not calibrated.** The level reading is
-     `ax=+14 mg, ay=−14 mg, az=1010 mg` → ~0.8° of roll/pitch bias and a 1 % scale
-     error. A tilt error θ rotates the compensated heading by roughly θ·tan(dip).
-  2. Soft-iron residual: dip shifts 1-2° between level and 30° tilt; the fit residual
-     is 0.94 %, so a small residual is expected.
-  3. A small mag-vs-accel mounting skew (1-2°) that the 24-entry axis map cannot
-     represent.
-- The console run also shows how sensitive the place is: \|B\| differed by 10 % between
-  the level states and the post-turn state (dip −57.8° → −49.8°), so its static metrics
-  were excluded; the turn still judges cleanly because the gyro reference does not care
-  about the field.
+- The dynamic checks (tilt, turn) are limited by the reference, not obviously by the
+  AHRS: see the measurement-limit paragraph above. What is certain is that the heading
+  never showed a gross error (no degrees-scale jump) during any manoeuvre.
+- The six-face accelerometer calibration improved the level reading from \|a\| =
+  1008.4 mg to 1004.9 mg. The residual 0.5 % comes from the faces being hand-aligned
+  (the −Z face was ~8° off: y read −137 mg), which is the accuracy limit of the
+  6-face method; a tumbling ellipsoid fit would remove that operator dependency.
+- Every run so far sat in a different field: dip between 48° and 60°, \|B\| between
+  44.9 and 51.0 µT, and in the two-way tilt run \|B\| moved 5.7 % during a single static
+  stretch. The desk is not a valid measurement site; a hand near the board changes the
+  field by more than the effect being measured.
 
 ### Accelerometer six-face calibration (added 2026-10-25)
 
