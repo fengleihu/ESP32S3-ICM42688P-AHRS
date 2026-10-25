@@ -77,6 +77,8 @@ PAGE = r"""<!doctype html>
 <div class="row">
   <button data-label="level">① 水平</button>
   <button data-label="tilt30">② 倾斜 30°</button>
+  <button data-label="pitch+30">低头 +30°</button>
+  <button data-label="pitch-30">抬头 −30°</button>
   <button data-label="level2">③ 回水平</button>
   <button data-label="turn180">④ 转 180°</button>
 </div>
