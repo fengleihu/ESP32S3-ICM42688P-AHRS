@@ -17,13 +17,26 @@
 #include "icm42688p.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
 
 static const char *TAG = "icm42688p";
+
+/* 加速度计六面标定存这里（与磁校准同一个 NVS 命名空间，方便一起备份/清理） */
+#define ACC_CAL_NVS_NS  "att9axis"
+#define ACC_CAL_NVS_KEY "acccal"
+#define ACC_CAL_MAGIC   0x41434331u /* "ACC1" */
+
+typedef struct {
+    uint32_t magic;
+    float bias_g[3];
+    float scale[3];
+} accel_cal_blob_t;
 
 /* ---------------- 寄存器 ---------------- */
 #define REG_DEVICE_CONFIG   0x11
@@ -120,6 +133,9 @@ esp_err_t icm42688p_init(icm42688p_t *imu, i2c_master_bus_handle_t bus, uint8_t 
     imu->addr = addr;
     imu->accel_lsb_per_g = ACCEL_LSB_PER_G;
     imu->gyro_lsb_per_dps = GYRO_LSB_PER_DPS;
+    for (int i = 0; i < 3; i++) {
+        imu->accel_scale[i] = 1.0f; /* 未标定：原样通过 */
+    }
 
     esp_err_t err = i2c_master_probe(bus, addr, I2C_TIMEOUT_MS);
     if (err != ESP_OK) {
@@ -204,9 +220,12 @@ esp_err_t icm42688p_read(icm42688p_t *imu, icm42688p_sample_t *out)
     out->raw[5] = (int16_t)((buf[10] << 8) | buf[11]);
     out->raw[6] = (int16_t)((buf[12] << 8) | buf[13]);
 
-    out->accel_g[0] = out->raw[0] / imu->accel_lsb_per_g;
-    out->accel_g[1] = out->raw[1] / imu->accel_lsb_per_g;
-    out->accel_g[2] = out->raw[2] / imu->accel_lsb_per_g;
+    out->accel_g[0] = (out->raw[0] / imu->accel_lsb_per_g - imu->accel_bias_g[0]) *
+                      imu->accel_scale[0];
+    out->accel_g[1] = (out->raw[1] / imu->accel_lsb_per_g - imu->accel_bias_g[1]) *
+                      imu->accel_scale[1];
+    out->accel_g[2] = (out->raw[2] / imu->accel_lsb_per_g - imu->accel_bias_g[2]) *
+                      imu->accel_scale[2];
 
     out->gyro_dps[0] = out->raw[4] / imu->gyro_lsb_per_dps - imu->gyro_bias_dps[0];
     out->gyro_dps[1] = out->raw[5] / imu->gyro_lsb_per_dps - imu->gyro_bias_dps[1];
@@ -273,4 +292,124 @@ esp_err_t icm42688p_calibrate_gyro(icm42688p_t *imu, int samples, int sample_del
         *out_std_dps = worst_std;
     }
     return ESP_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* 加速度计六面标定                                                    */
+/* ------------------------------------------------------------------ */
+static bool accel_cal_sane(const float bias[3], const float scale[3])
+{
+    for (int i = 0; i < 3; i++) {
+        if (!isfinite(bias[i]) || !isfinite(scale[i])) {
+            return false;
+        }
+        if (fabsf(bias[i]) > 0.15f || scale[i] < 0.85f || scale[i] > 1.20f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+esp_err_t icm42688p_accel_cal_set(icm42688p_t *imu,
+                                  const icm42688p_accel_cal_t *cal)
+{
+    if (!imu || !cal) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!accel_cal_sane(cal->bias_g, cal->scale)) {
+        ESP_LOGE(TAG, "加速度计标定超范围，拒绝：bias=[%.3f, %.3f, %.3f] g "
+                      "scale=[%.3f, %.3f, %.3f]（要求 |bias|<=0.15g、0.85~1.20）",
+                 cal->bias_g[0], cal->bias_g[1], cal->bias_g[2], cal->scale[0],
+                 cal->scale[1], cal->scale[2]);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        imu->accel_bias_g[i] = cal->bias_g[i];
+        imu->accel_scale[i] = cal->scale[i];
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ACC_CAL_NVS_NS, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        accel_cal_blob_t blob = {.magic = ACC_CAL_MAGIC};
+        for (int i = 0; i < 3; i++) {
+            blob.bias_g[i] = cal->bias_g[i];
+            blob.scale[i] = cal->scale[i];
+        }
+        err = nvs_set_blob(h, ACC_CAL_NVS_KEY, &blob, sizeof(blob));
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "加速度计标定已生效，但写 NVS 失败：%s", esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "加速度计标定已生效：bias=[%.4f, %.4f, %.4f] g "
+                  "scale=[%.4f, %.4f, %.4f]",
+             imu->accel_bias_g[0], imu->accel_bias_g[1], imu->accel_bias_g[2],
+             imu->accel_scale[0], imu->accel_scale[1], imu->accel_scale[2]);
+    return ESP_OK;
+}
+
+void icm42688p_accel_cal_get(const icm42688p_t *imu, icm42688p_accel_cal_t *out)
+{
+    if (!imu || !out) {
+        return;
+    }
+    for (int i = 0; i < 3; i++) {
+        out->bias_g[i] = imu->accel_bias_g[i];
+        out->scale[i] = imu->accel_scale[i];
+    }
+    out->valid = imu->accel_scale[0] != 1.0f || imu->accel_scale[1] != 1.0f ||
+                 imu->accel_scale[2] != 1.0f || imu->accel_bias_g[0] != 0.0f ||
+                 imu->accel_bias_g[1] != 0.0f || imu->accel_bias_g[2] != 0.0f;
+}
+
+esp_err_t icm42688p_accel_cal_load(icm42688p_t *imu)
+{
+    nvs_handle_t h;
+    if (nvs_open(ACC_CAL_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    accel_cal_blob_t blob;
+    size_t len = sizeof(blob);
+    esp_err_t err = nvs_get_blob(h, ACC_CAL_NVS_KEY, &blob, &len);
+    nvs_close(h);
+    if (err != ESP_OK || len != sizeof(blob) || blob.magic != ACC_CAL_MAGIC) {
+        return err == ESP_OK ? ESP_ERR_INVALID_SIZE : err;
+    }
+    for (int i = 0; i < 3; i++) {
+        imu->accel_bias_g[i] = blob.bias_g[i];
+        imu->accel_scale[i] = blob.scale[i];
+    }
+    ESP_LOGI(TAG, "已载入加速度计标定：bias=[%.4f, %.4f, %.4f] g "
+                  "scale=[%.4f, %.4f, %.4f]",
+             imu->accel_bias_g[0], imu->accel_bias_g[1], imu->accel_bias_g[2],
+             imu->accel_scale[0], imu->accel_scale[1], imu->accel_scale[2]);
+    return ESP_OK;
+}
+
+esp_err_t icm42688p_accel_cal_clear(icm42688p_t *imu)
+{
+    for (int i = 0; i < 3; i++) {
+        imu->accel_bias_g[i] = 0.0f;
+        imu->accel_scale[i] = 1.0f;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(ACC_CAL_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_erase_key(h, ACC_CAL_NVS_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    ESP_LOGW(TAG, "加速度计标定已清除（恢复未标定）");
+    return err;
 }

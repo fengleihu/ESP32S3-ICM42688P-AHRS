@@ -85,6 +85,28 @@ I (1300) att9axis: Mag calibration OK: samples=375 method=椭球拟合 quality=0
 An existing `MAG1` (min-max) NVS blob is converted on load so an upgrade does not
 clear the calibration, but the boot log recommends running `RECAL_MAG` once.
 
+## Accelerometer calibration (six faces)
+
+The accelerometer was the largest remaining error source: a level board reads
+`ax=+14 mg, ay=-14 mg, az=1010 mg`, i.e. ~0.8° of roll/pitch bias plus ~1 % scale error.
+Tilt compensation derives roll/pitch from the accelerometer, and a tilt error θ turns
+into a heading error of roughly θ·tan(dip), so this alone costs a couple of degrees of
+yaw when the board is tilted.
+
+`tools/att_gui.py` has a six-face panel:
+
+1. hold a body axis up (`+Z 朝上` … `-Y 朝上`) and press the matching button — the
+   console averages ~1 s of samples for that face;
+2. after six faces press 计算并写入.
+
+The console computes per axis `bias = (up + down)/2` and `scale = 2 g / (up − down)`,
+prints the residual `|a| − 1` for every face, and sends
+`ACC_CAL,bx,by,bz,sx,sy,sz`. The firmware validates the ranges (`|bias| ≤ 0.15 g`,
+`0.85 ≤ scale ≤ 1.20`), applies it immediately and stores it in NVS (`att9axis/acccal`,
+magic `ACC1`). `ACC_CAL_CLEAR` restores the identity calibration. The maths is covered by
+`python tools/host_test/test_acccal.py`, which recovers a known bias/scale from synthetic
+faces.
+
 ## Request magnetometer recalibration
 
 The `RECAL_MAG` serial command works over the native USB port. `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`

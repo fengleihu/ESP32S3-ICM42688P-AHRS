@@ -258,16 +258,43 @@ Last run was done with the button console (`tools/att_gui.py`, marks at 3.9 s / 
   were excluded; the turn still judges cleanly because the gyro reference does not care
   about the field.
 
+### Accelerometer six-face calibration (added 2026-10-25)
+
+Why: the tilt error (1.3-3.6° depending on the spot) is dominated by the uncalibrated
+accelerometer — a level board reads `ax=+14 mg, ay=-14 mg, az=1010 mg`, i.e. ~0.8° of
+roll/pitch bias and ~1 % scale error. Tilt compensation uses the accelerometer to know
+the attitude, and a tilt error θ becomes a heading error of roughly θ·tan(dip)
+(≈2.2° of heading for 1.6° of tilt at dip 54°).
+
+How: the six-face panel in `tools/att_gui.py`. Hold each body axis up (`+Z 朝上` …
+`−Y 朝上`), one button press per face while the board is settled, then 计算并写入.
+The console averages ~1 s of samples per face, computes `bias = (up + down)/2` and
+`scale = 2 g / (up − down)` per axis, prints the `|a| − 1` residual of all six faces, and
+sends `ACC_CAL,bx,by,bz,sx,sy,sz`. The firmware validates (`|bias| ≤ 0.15 g`,
+`0.85 ≤ scale ≤ 1.20`), applies it immediately and stores it in NVS
+(`att9axis/acccal`, magic `ACC1`). `ACC_CAL_CLEAR` returns to identity.
+
+Verified without moving the board:
+- `ACC_CAL,-0.014,0.014,-0.010,1.005,1.005,0.995` → `ACC_CAL_OK` and the ATT accel
+  columns shifted from `(-26, 28, 1008)` to `(-12, 14, 1014) mg`, i.e. the bias and
+  scale are applied on the next sample;
+- rebooting logs `已载入加速度计标定：bias=[…] scale=[…]` and the corrected values
+  persist (NVS);
+- `ACC_CAL_CLEAR` → `ACC_CAL_CLEARED`, raw readings back, and the next boot has no
+  calibration line;
+- the maths is covered by `python tools/host_test/test_acccal.py`: a known
+  bias (20/−15/8 mg) and scale (1.02/0.98/1.005) are recovered to <0.1 mg / 0.001, and a
+  face that was not held flat is rejected instead of being written to the board.
+
+Still to do: run the six faces for real, then repeat the tilt test.
+
 ### Next steps
 
-1. The four criteria are now measured (turn 0.08°, tilt 1.3-3.6° depending on location).
-   If a firmer tilt number is wanted, repeat the tilt test on the same clean spot twice
-   and compare — the run-to-run spread is environmental, not firmware.
-2. Attack the tilt error with a proper accelerometer calibration (zero-g offset + scale,
-   6-face), since the level reading already shows ~0.8° of bias. That is the one change
-   most likely to move the tilt result comfortably below 2° everywhere.
-3. Optional: estimate a small accel-vs-mag mounting rotation (1-2°) — the 24-entry axis
-   map can only express multiples of 90°.
+1. Six-face accelerometer calibration via the console, then re-run the tilt test — the
+   expectation is <1° of tilt-induced heading error (from 1.3-3.6° now).
+2. If it is still above ~1.5°, estimate a small accel-vs-mag mounting rotation (1-2°):
+   the 24-entry axis map can only express multiples of 90°.
+3. Push the branch (currently ahead of origin by several commits).
 
 ### First boot after the calibration change (2026-10-25)
 

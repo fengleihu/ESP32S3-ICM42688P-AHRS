@@ -1,5 +1,6 @@
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ahrs.h"
@@ -32,7 +33,9 @@ static const char *TAG = "att9axis";
 #define DEG_TO_RAD 0.017453292519943295f
 #define MAG_RECAL_COMMAND "RECAL_MAG"
 #define MARK_COMMAND "MARK"
-#define CMD_BUF_SIZE 64
+#define ACC_CAL_COMMAND "ACC_CAL"
+#define ACC_CAL_CLEAR_COMMAND "ACC_CAL_CLEAR"
+#define CMD_BUF_SIZE 96
 
 typedef struct {
     float roll;
@@ -315,6 +318,53 @@ static void handle_mark(const char *line)
     printf("MARK,%lld,%s\n", (long long)(esp_timer_get_time() / 1000), label);
 }
 
+/*
+ * ACC_CAL,<bias_x>,<bias_y>,<bias_z>,<scale_x>,<scale_y>,<scale_z>
+ *
+ * 六面标定在 PC 端算（tools/att_gui.py 的按钮流程），固件只负责"校验 + 生效 +
+ * 存 NVS"。这样标定算法可以随便改、也能在 PC 上单测，不用重新烧板子。
+ */
+static void handle_accel_cal(char *line)
+{
+    char *p = strchr(line, ',');
+    if (!p) {
+        ESP_LOGE(TAG, "ACC_CAL 缺少参数（需要 6 个浮点）");
+        return;
+    }
+    p++;
+    float v[6];
+    int n = 0;
+    while (n < 6 && *p) {
+        char *end = NULL;
+        float f = strtof(p, &end);
+        if (end == p) {
+            break;
+        }
+        v[n++] = f;
+        p = end;
+        if (*p == ',') {
+            p++;
+        }
+    }
+    if (n != 6) {
+        ESP_LOGE(TAG, "ACC_CAL 参数个数不对：%d（需要 6 个）", n);
+        return;
+    }
+    icm42688p_accel_cal_t cal = {
+        .bias_g = {v[0], v[1], v[2]},
+        .scale = {v[3], v[4], v[5]},
+        .valid = true,
+    };
+    esp_err_t err = icm42688p_accel_cal_set(&s_imu, &cal);
+    if (err == ESP_OK) {
+        printf("ACC_CAL_OK,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f\n", (double)cal.bias_g[0],
+               (double)cal.bias_g[1], (double)cal.bias_g[2], (double)cal.scale[0],
+               (double)cal.scale[1], (double)cal.scale[2]);
+    } else {
+        printf("ACC_CAL_REJECTED,%s\n", esp_err_to_name(err));
+    }
+}
+
 static void serial_command_task(void *arg)
 {
     (void)arg;
@@ -323,8 +373,9 @@ static void serial_command_task(void *arg)
     bool overflow = false;
 
     ESP_LOGI(TAG, "Serial command enabled: %s = recalibrate BMM350, "
+                  "%s,<6 floats> = accelerometer calibration, "
                   "MARK <label> = mark a test segment",
-             MAG_RECAL_COMMAND);
+             MAG_RECAL_COMMAND, ACC_CAL_COMMAND);
     /* 这一行必须保持原样：pc_viewer 用它判断"命令通道就绪"（精确比较） */
     printf("CMD_READY,%s\n", MAG_RECAL_COMMAND);
     for (;;) {
@@ -345,6 +396,14 @@ static void serial_command_task(void *arg)
                 /* 超长命令：不匹配，但已经记过日志了 */
             } else if (strcmp(command, MAG_RECAL_COMMAND) == 0) {
                 request_mag_recalibration();
+            } else if (strncmp(command, ACC_CAL_CLEAR_COMMAND,
+                               strlen(ACC_CAL_CLEAR_COMMAND)) == 0) {
+                icm42688p_accel_cal_clear(&s_imu);
+                printf("ACC_CAL_CLEARED\n");
+            } else if (strncmp(command, ACC_CAL_COMMAND,
+                               strlen(ACC_CAL_COMMAND)) == 0 &&
+                       command[sizeof(ACC_CAL_COMMAND) - 1] == ',') {
+                handle_accel_cal(command);
             } else if (strncmp(command, MARK_COMMAND, strlen(MARK_COMMAND)) == 0 &&
                        (command[sizeof(MARK_COMMAND) - 1] == '\0' ||
                         command[sizeof(MARK_COMMAND) - 1] == ' ')) {
@@ -405,6 +464,9 @@ void app_main(void)
         ESP_LOGE(TAG, "ICM42688P init failed: %s", esp_err_to_name(err));
         return;
     }
+
+    /* 六面标定（如果做过）：必须在陀螺校准之前，因为它影响 accel_g 的解释 */
+    icm42688p_accel_cal_load(&s_imu);
 
     err = icm42688p_calibrate_gyro(&s_imu, GYRO_CAL_SAMPLES, GYRO_CAL_DELAY_MS, NULL);
     if (err != ESP_OK) {

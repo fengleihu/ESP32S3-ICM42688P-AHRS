@@ -49,8 +49,17 @@ typedef struct {
     float accel_lsb_per_g;
     float gyro_lsb_per_dps;
     float gyro_bias_dps[3]; /* 开机静态校准得到的零偏 */
+    /* 加速度计六面标定（偏移 + 标度）。未标定时 bias=0、scale=1。 */
+    float accel_bias_g[3];
+    float accel_scale[3];
     uint8_t who_am_i;
 } icm42688p_t;
+
+typedef struct {
+    float bias_g[3];  /* 零 g 偏移 */
+    float scale[3];   /* 标度修正（无量纲，1.0 = 不动） */
+    bool valid;
+} icm42688p_accel_cal_t;
 
 /**
  * 探测并初始化传感器（软复位 → 配置量程/ODR → 进入低噪声模式）。
@@ -74,6 +83,27 @@ esp_err_t icm42688p_calibrate_gyro(icm42688p_t *imu, int samples, int sample_del
 
 /** 读单个寄存器 */
 esp_err_t icm42688p_read_reg(icm42688p_t *imu, uint8_t reg, uint8_t *val);
+
+/**
+ * 设置六面加速度计标定：accel_g = (raw/lsb - bias_g) * scale，并立即生效、存 NVS。
+ *
+ * 为什么要做：未标定时实测水平读数 ax=+14 mg、ay=-14 mg、az=1010 mg —— 0.8° 的
+ * 横滚/俯仰偏置加 1% 标度误差。倾斜补偿用加速度计定姿态，这个偏置会被
+ * tan(磁倾角) 放大成航向误差（dip≈54° 时 1.6° 倾角误差 ≈ 2.2° 航向误差）。
+ *
+ * 合理性检查：|bias| ≤ 0.15 g、0.85 ≤ scale ≤ 1.2，超出直接拒绝（说明六面数据不对）。
+ */
+esp_err_t icm42688p_accel_cal_set(icm42688p_t *imu,
+                                  const icm42688p_accel_cal_t *cal);
+
+/** 取当前生效的加速度计标定 */
+void icm42688p_accel_cal_get(const icm42688p_t *imu, icm42688p_accel_cal_t *out);
+
+/** 从 NVS 载入（没有就用单位标定）。init 之后调用。 */
+esp_err_t icm42688p_accel_cal_load(icm42688p_t *imu);
+
+/** 清除 NVS 里的标定并恢复单位标定 */
+esp_err_t icm42688p_accel_cal_clear(icm42688p_t *imu);
 
 /** 写单个寄存器 */
 esp_err_t icm42688p_write_reg(icm42688p_t *imu, uint8_t reg, uint8_t val);

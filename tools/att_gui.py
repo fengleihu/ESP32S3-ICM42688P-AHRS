@@ -30,6 +30,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
@@ -60,6 +61,7 @@ PAGE = r"""<!doctype html>
  pre { background:#0d1117; border:1px solid #253040; border-radius:10px; padding:14px;
        overflow:auto; font-size:12.5px; line-height:1.45; min-height:160px; }
  .ok { color:#3fb950; } .bad { color:#f85149; }
+ button.done { background:#174d2b; border-color:#2ea043; }
 </style></head>
 <body>
 <h1>AHRS 测量台</h1>
@@ -84,6 +86,23 @@ PAGE = r"""<!doctype html>
   <button id="clear">清空记录，重新开始</button>
 </div>
 
+<div class="sub" style="margin:18px 0 6px">
+  加速度计六面标定 —— 把板子那一个轴朝上放稳，点一下对应按钮；六个面都点完再「计算并写入」。
+  （+X 机头方向 · +Y 左 · +Z 板面朝上；这是为了修掉倾斜时的航向误差，不影响磁校准）
+</div>
+<div class="row">
+  <button data-face="+z">+Z 朝上</button>
+  <button data-face="-z">−Z 朝上</button>
+  <button data-face="+x">+X 朝上</button>
+  <button data-face="-x">−X 朝上</button>
+  <button data-face="+y">+Y 朝上</button>
+  <button data-face="-y">−Y 朝上</button>
+</div>
+<div class="row">
+  <button class="primary" id="accapply">计算并写入</button>
+  <button id="accclear">清除加速度计标定</button>
+</div>
+
 <pre id="out">连接中…</pre>
 <div class="sub" id="status"></div>
 
@@ -105,7 +124,11 @@ async function refresh(){
     document.getElementById('tilt').textContent  = s.att ? s.att.tilt.toFixed(1) : '--';
     document.getElementById('bmag').textContent  = s.att ? s.att.bmag.toFixed(1) : '--';
     statusEl.textContent =
-      s.port + ' · ' + s.att_count + ' 帧 · ' + s.marks.length + ' 个标记 · ' + s.log;
+      s.port + ' · ' + s.att_count + ' 帧 · ' + s.marks.length + ' 个标记 · ' +
+      s.faces.length + '/6 面 · ' + s.log;
+    const have = new Set(s.faces);
+    document.querySelectorAll('button[data-face]').forEach(b =>
+      b.classList.toggle('done', have.has(b.dataset.face)));
   } catch (e) {
     statusEl.textContent = '与测量台断开（服务是否已停止？）';
   }
@@ -139,6 +162,26 @@ document.getElementById('clear').onclick = async () => {
   out.className = '';
   out.textContent = '已清空记录，可以重新开始。';
 };
+document.querySelectorAll('button[data-face]').forEach(b => {
+  b.onclick = async () => {
+    const j = await post('/face/' + encodeURIComponent(b.dataset.face));
+    out.className = j.ok ? '' : 'bad';
+    out.textContent = j.text + (j.ok ? '\n已采集的面：' + j.faces.join('  ') +
+                                 '\n（六个面都采集完才能「计算并写入」）' : '');
+    if (j.ok) b.classList.add('done');
+  };
+});
+document.getElementById('accapply').onclick = async () => {
+  const j = await post('/acccal');
+  out.className = j.ok ? 'ok' : 'bad';
+  out.textContent = j.text;
+};
+document.getElementById('accclear').onclick = async () => {
+  const j = await post('/acccal/clear');
+  document.querySelectorAll('button[data-face]').forEach(b => b.classList.remove('done'));
+  out.className = '';
+  out.textContent = j.text;
+};
 setInterval(refresh, 300); refresh();
 </script>
 </body></html>
@@ -161,6 +204,9 @@ class Recorder:
         self.marks = []
         self.att = None
         self.ser = serial.Serial(port, baud, timeout=0.2)
+        self.recent = deque(maxlen=40)   # 最近的加速度样本（mg），六面标定用
+        self.faces = {}                  # 已采集的六个面
+        self.last_acc_cal = None         # 固件对 ACC_CAL 的回应
         threading.Thread(target=self._reader, daemon=True).start()
 
     # ---- 串口 ----
@@ -182,11 +228,21 @@ class Recorder:
                 if line.startswith("ATT,"):
                     self.att_count += 1
                     self.att = self._parse_att(line)
+                    p = line.split(",")
+                    if len(p) > 9:
+                        try:
+                            self.recent.append((float(p[7]), float(p[8]),
+                                                float(p[9])))
+                        except ValueError:
+                            pass
                 elif line.startswith("MARK,"):
                     parts = line.split(",", 2)
                     if len(parts) >= 3:
                         self.marks.append({"time": parts[1] + "ms",
                                            "label": parts[2].strip()})
+                elif line.startswith("ACC_CAL_OK") or line.startswith("ACC_CAL_REJECTED") \
+                        or line.startswith("ACC_CAL_CLEARED"):
+                    self.last_acc_cal = line
 
     @staticmethod
     def _parse_att(line):
@@ -224,7 +280,74 @@ class Recorder:
         with self.lock:
             return {"port": self.port, "att_count": self.att_count,
                     "att": self.att, "marks": list(self.marks),
+                    "faces": sorted(self.faces), "acc_cal": self.last_acc_cal,
                     "log": self.out_path}
+
+    # ---- 加速度计六面标定 ----
+    AXES = (("x", "+x", "-x"), ("y", "+y", "-y"), ("z", "+z", "-z"))
+    FACES = ("+z", "-z", "+x", "-x", "+y", "-y")
+
+    def capture_face(self, name):
+        """把"当前这个面"的加速度均值记下来（取最近 ~1 s）。"""
+        if name not in self.FACES:
+            return {"ok": False, "text": "未知的面：" + name}
+        with self.lock:
+            window = list(self.recent)[-10:]
+        if len(window) < 5:
+            return {"ok": False, "text": "样本不够，板子是不是没在出数？"}
+        ax = sum(w[0] for w in window) / len(window)
+        ay = sum(w[1] for w in window) / len(window)
+        az = sum(w[2] for w in window) / len(window)
+        self.faces[name] = (ax, ay, az)
+        return {"ok": True, "faces": sorted(self.faces),
+                "text": "%s 已采集：%+.0f, %+.0f, %+.0f mg" % (name, ax, ay, az)}
+
+    def apply_accel_cal(self):
+        missing = [n for n in self.FACES if n not in self.faces]
+        if missing:
+            return {"ok": False, "text": "还差这些面没采集：" + "  ".join(missing)}
+        bias, scale = [], []
+        for i, (axis, up, dn) in enumerate(self.AXES):
+            upv, dnv = self.faces[up][i], self.faces[dn][i]
+            span = upv - dnv
+            if abs(span) < 1500:
+                return {"ok": False,
+                        "text": "%s 轴两个面对比只差 %.0f mg（应接近 ±2000），"
+                                "这一面没摆正或没稳住" % (axis, span)}
+            b = (upv + dnv) / 2.0
+            s = 2000.0 / span
+            if abs(b) > 150 or not (0.85 <= s <= 1.20):
+                return {"ok": False,
+                        "text": "%s 轴偏置 %.0f mg / 标度 %.3f 超出合理范围"
+                                % (axis, b, s)}
+            bias.append(b / 1000.0)
+            scale.append(s)
+
+        cmd = "ACC_CAL,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f" % (*bias, *scale)
+        self.last_acc_cal = None
+        self.send(cmd)
+        time.sleep(0.4)
+
+        lines = ["面    原始(mg)            校正后(g)            |a|-1"]
+        for name in self.FACES:
+            raw = self.faces[name]
+            corr = [(raw[i] - bias[i] * 1000.0) * scale[i] for i in range(3)]
+            norm = math.sqrt(sum(c * c for c in corr)) / 1000.0
+            lines.append("%-4s %6.0f %6.0f %6.0f   %6.3f %6.3f %6.3f   %+0.3f"
+                         % (name, raw[0], raw[1], raw[2], corr[0] / 1000.0,
+                            corr[1] / 1000.0, corr[2] / 1000.0, norm - 1.0))
+        lines.append("bias  = [%+.4f, %+.4f, %+.4f] g" % tuple(bias))
+        lines.append("scale = [%.4f, %.4f, %.4f]" % tuple(scale))
+        lines.append("固件回应：" + (self.last_acc_cal or "（没有回应，检查串口）"))
+        return {"ok": True, "text": "\n".join(lines), "cmd": cmd}
+
+    def clear_accel_cal(self):
+        self.last_acc_cal = None
+        self.send("ACC_CAL_CLEAR")
+        time.sleep(0.3)
+        self.faces.clear()
+        return {"ok": True,
+                "text": "已清除加速度计标定：" + (self.last_acc_cal or "")}
 
     def clear(self):
         with self.lock:
@@ -275,6 +398,16 @@ def make_handler(rec):
             elif path == "/recal":
                 rec.send("RECAL_MAG")
                 self._reply(200, json.dumps({"ok": True}), "application/json")
+            elif path.startswith("/face/"):
+                name = unquote(path[len("/face/"):])
+                self._reply(200, json.dumps(rec.capture_face(name)),
+                            "application/json")
+            elif path == "/acccal":
+                self._reply(200, json.dumps(rec.apply_accel_cal()),
+                            "application/json")
+            elif path == "/acccal/clear":
+                self._reply(200, json.dumps(rec.clear_accel_cal()),
+                            "application/json")
             elif path == "/clear":
                 rec.clear()
                 self._reply(200, json.dumps({"ok": True}), "application/json")
