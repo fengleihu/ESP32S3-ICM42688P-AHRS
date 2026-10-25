@@ -7,3 +7,4 @@ sdkconfig.backup
 *.swp
 *.swo
 *.exe
+__pycache__/
