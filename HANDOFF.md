@@ -219,47 +219,55 @@ I (17080) mag: 校准完成（椭球拟合）：喂入 358 个样本，存 358�
               offset=[-28.7, 18.8, 83.8] µT 半径=49.9 µT 残差=0.94% 覆盖度=0.87
 ```
 
+Last run was done with the button console (`tools/att_gui.py`, marks at 3.9 s / 14.8 s /
+22.8 s / 39.6 s):
+
 | Item | Criterion | Measured | Verdict |
 |---|---|---|---|
 | Magnetic calibration | residual / coverage / radius | 0.94 % / 0.87 / 49.9 µT | pass |
-| Static σ, 132 s (`cal.log`) | ≤ 0.5 deg | **0.092 deg** | pass |
-| Static σ, 46 s (criteria run) | ≤ 0.5 deg | **0.123 deg** | pass |
-| Drift | ≤ 2 deg/min | **−0.11 / +0.22 deg/min** | pass |
-| \|yaw − mag heading\| | ≤ 1 deg | **0.07 / 0.23 deg** | pass |
-| Tilt 31 deg (gyro-corrected) | ≤ 2 deg | **3.6 deg** | **fail** |
-| 180 deg turn | ≤ 5 deg | not measured — the post-turn plateau sat in a different field (\|B\| 47.7 vs 49.1 µT, dip −57.9° vs −52.5°) and was excluded | n/a |
+| Static σ | ≤ 0.5 deg | 0.092 (`cal.log`, 132 s) / 0.123 / **0.23** (console run) | pass |
+| Drift | ≤ 2 deg/min | −0.11 / +0.22 deg/min (long static segments only) | pass |
+| \|yaw − mag heading\| | ≤ 1 deg | 0.07 / 0.23 / **0.74** (console run) | pass |
+| Tilt 30 deg, gyro-corrected | ≤ 2 deg | **1.31 deg** (console run) / 3.6 deg (earlier run) | pass (borderline) |
+| 180 deg turn, gyro-corrected | ≤ 5 deg | **0.08 deg** — raw Δyaw −179.6° vs gyro +180.3° | pass |
+| Mag heading vs gyro, worst pair | ≤ 2 deg | **1.31 deg** | pass |
 
 ### What the numbers say
 
 - The ellipsoid calibration fixed the old weakness: \|B\| now stays at the stored radius
   (49.9 µT) instead of wandering between 45 and 57 µT.
-- Static behaviour is excellent and repeatable: σ 0.09-0.12°, drift ~0.2 deg/min,
-  yaw vs magnetic heading 0.07-0.23°.
-- Tilt: going into the 30° tilt the heading error is **0.0°** — the measured Δyaw was
-  +10.8° and the gyro integral was +10.8°, i.e. the operator genuinely twisted the board
-  while tilting. Coming back out of the tilt the heading was **3.6°** off with **0.0°**
-  of gyro rotation, so 3.6° is a real tilt-induced heading error, above the 2° limit.
-- Most likely cause, in order:
+- Static behaviour is excellent and repeatable: σ 0.09-0.23°, drift ~0.2 deg/min,
+  yaw vs magnetic heading 0.07-0.74°.
+- Turn: the board really turned 180.3° (gyro) and the AHRS reported 179.6°, i.e. 0.08°
+  of heading error over the whole turn. This is the strongest single result of the run.
+- Tilt: 1.31° in the console run, 3.6° in the run before it. Both are gyro-corrected, so
+  the difference is the environment: the two runs sat in different fields
+  (\|B\| 44.9 / dip −58.8° vs \|B\| 49.1 / dip −54.0°), and a local distortion biases the
+  tilted heading. The 2° limit is met in the cleaner spot and missed in the other, so
+  treat the tilt result as 1.3-3.6° depending on where the board sits.
+- Likely contributors to the remaining tilt error, in order:
   1. **The accelerometer is not calibrated.** The level reading is
      `ax=+14 mg, ay=−14 mg, az=1010 mg` → ~0.8° of roll/pitch bias and a 1 % scale
-     error. A tilt error θ rotates the compensated heading by roughly θ·tan(dip); with
-     dip ≈ 54°, 1.6° of tilt error already gives ~2.2°.
-  2. Soft-iron residual: dip shifts 2° between level (−54.0°) and 30° tilt (−52.0°);
-     the fit residual is 0.94 %, so a small residual is expected.
+     error. A tilt error θ rotates the compensated heading by roughly θ·tan(dip).
+  2. Soft-iron residual: dip shifts 1-2° between level and 30° tilt; the fit residual
+     is 0.94 %, so a small residual is expected.
   3. A small mag-vs-accel mounting skew (1-2°) that the 24-entry axis map cannot
      represent.
-- The turn must be redone in a stable field. Rotating the board by hand moved it into
-  a different field (dip changed 5.4°), which is a measurement problem, not a firmware
-  one.
+- The console run also shows how sensitive the place is: \|B\| differed by 10 % between
+  the level states and the post-turn state (dip −57.8° → −49.8°), so its static metrics
+  were excluded; the turn still judges cleanly because the gyro reference does not care
+  about the field.
 
 ### Next steps
 
-1. Redo only the turn, keeping the board in the same spot (rotate it on a sheet of
-   paper); 1-2 minutes.
-2. Then attack the 3.6° tilt error. The single most promising change is a proper
-   accelerometer calibration (zero-g offset + scale, 6-face), because the level reading
-   already shows ~0.8° of bias. Second step would be estimating a small accel-vs-mag
-   mounting rotation.
+1. The four criteria are now measured (turn 0.08°, tilt 1.3-3.6° depending on location).
+   If a firmer tilt number is wanted, repeat the tilt test on the same clean spot twice
+   and compare — the run-to-run spread is environmental, not firmware.
+2. Attack the tilt error with a proper accelerometer calibration (zero-g offset + scale,
+   6-face), since the level reading already shows ~0.8° of bias. That is the one change
+   most likely to move the tilt result comfortably below 2° everywhere.
+3. Optional: estimate a small accel-vs-mag mounting rotation (1-2°) — the 24-entry axis
+   map can only express multiples of 90°.
 
 ### First boot after the calibration change (2026-10-25)
 

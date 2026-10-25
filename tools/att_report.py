@@ -528,8 +528,9 @@ def analyze_file(path, args):
     if env_bad:
         print(f"  ! 带 ! 的 {len(env_bad)} 个状态窗口 |B| 或 dip 偏离中位数"
               f"（> {args.max_b_drift * 100:.0f}% / {args.max_dip_drift:.1f}°）："
-              f"该段磁场环境与其它段不同（换位置、靠近金属或被手遮挡），"
-              f"不参与判据")
+              f"该段磁场环境与其它段不同（换位置、靠近金属或被手遮挡）。"
+              + ("有陀螺参考时仍可用于判定段间变化（见下），但静态 σ/漂移不采用它。"
+                 if has_gyro(rows) else "不参与判据。"))
 
     checks = []
 
@@ -571,13 +572,18 @@ def analyze_file(path, args):
                 "d_pitch": b["pitch"] - a["pitch"],
                 "d_yaw": wrap180(b["yaw"] - a["yaw"]),
                 "d_tilt": b["tilt"] - a["tilt"],
-                "usable": not (a["env_out"] or b["env_out"]),
+                "usable": (cum is not None) or not (a["env_out"] or b["env_out"]),
                 # 只在"上一段结束 → 下一段开始"这段运动区间里积分陀螺：
                 # 窗口越短，残余零偏（0.01~0.02°/s）累积得越少
                 "d_yaw_gyro": (cum[b["i0"]] - cum[a["i1"]]) if gyro else None,
             }
             pairs.append(p)
-            note = "" if p["usable"] else "   （环境不一致，跳过）"
+            if not p["usable"]:
+                note = "   （环境不一致，跳过）"
+            elif a["env_out"] or b["env_out"]:
+                note = "   （环境有变化，用陀螺参考判定）"
+            else:
+                note = ""
             if gyro:
                 print("{:<14}->{:<14}{:>+8.1f}{:>+8.1f}{:>+8.1f}{:>+8.1f}{:>+10.1f}"
                       .format(p["a"][:13], p["b"][:13], p["d_roll"],
