@@ -36,7 +36,7 @@ from urllib.parse import unquote, urlparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import att_report  # noqa: E402
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AHRS 测量台</title>
@@ -89,6 +89,12 @@ PAGE = """<!doctype html>
 
 <script>
 const out = document.getElementById('out');
+const statusEl = document.getElementById('status');
+window.onerror = function (msg, src, line) {
+  out.className = 'bad';
+  out.textContent = 'JS 出错：' + msg + '\n' + (src || '') + ':' + line +
+    '\n请把这个提示发给我（页面脚本需要修）。';
+};
 function pct(x){ return (x>=0?'+':'') + x.toFixed(2); }
 async function refresh(){
   try {
@@ -98,9 +104,11 @@ async function refresh(){
     document.getElementById('pitch').textContent = s.att ? pct(s.att.pitch) : '--';
     document.getElementById('tilt').textContent  = s.att ? s.att.tilt.toFixed(1) : '--';
     document.getElementById('bmag').textContent  = s.att ? s.att.bmag.toFixed(1) : '--';
-    document.getElementById('status').textContent =
-      `${s.port} · ${s.att_count} 帧 · ${s.marks.length} 个标记 · ${s.log}`;
-  } catch (e) { /* 服务停了 */ }
+    statusEl.textContent =
+      s.port + ' · ' + s.att_count + ' 帧 · ' + s.marks.length + ' 个标记 · ' + s.log;
+  } catch (e) {
+    statusEl.textContent = '与测量台断开（服务是否已停止？）';
+  }
 }
 async function post(path, body){
   const r = await fetch(path, {method:'POST', body: body || ''});
@@ -109,6 +117,7 @@ async function post(path, body){
 document.querySelectorAll('button[data-label]').forEach(b => {
   b.onclick = async () => {
     const j = await post('/mark/' + encodeURIComponent(b.dataset.label));
+    out.className = '';
     out.textContent = '已标记：' + b.textContent + '（' + j.time + '）\n' +
       '累计标记：' + j.marks.map(m => m.label + '@' + m.time).join('  ');
   };
@@ -121,11 +130,13 @@ document.getElementById('analyze').onclick = async () => {
 };
 document.getElementById('recal').onclick = async () => {
   await post('/recal');
+  out.className = '';
   out.textContent = '已发送 RECAL_MAG：板子会重启，看 OLED 出现 MAG CAL 后开始转 15 秒。\n' +
-                    '注意：校准完 / 重启后，之前的状态窗口要重新点一遍。';
+                    '校准完 / 重启后，之前的状态窗口要重新点一遍。';
 };
 document.getElementById('clear').onclick = async () => {
   await post('/clear');
+  out.className = '';
   out.textContent = '已清空记录，可以重新开始。';
 };
 setInterval(refresh, 300); refresh();
