@@ -543,9 +543,9 @@ bool mag_cal_process(const float raw[3])
         s_cal.residual = fit.residual;
         s_cal.method = MAG_CAL_METHOD_ELLIPSOID;
         s_cal.valid = true;
-        ESP_LOGI(TAG, "校准完成（椭球拟合）：样本 %d（拟合 %d，剔除 %d） "
+        ESP_LOGI(TAG, "校准完成（椭球拟合）：喂入 %d 个样本，存 %d，拟合用 %d（剔除 %d） "
                       "offset=[%.1f, %.1f, %.1f] µT 半径=%.1f µT 残差=%.2f%% 覆盖度=%.2f",
-                 s_cal_count, s_stored, s_stored - fit.used, s_cal.offset[0],
+                 s_cal_count, s_stored, fit.used, s_stored - fit.used, s_cal.offset[0],
                  s_cal.offset[1], s_cal.offset[2], s_cal.radius,
                  100.0f * s_cal.residual, quality);
         if (fit.used < (s_stored * 9) / 10) {
