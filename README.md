@@ -102,12 +102,20 @@ truncated.
 
 | Tool | What it does |
 |---|---|
-| `tools/att_report.py record` | captures the serial log (`--port COM3 --seconds 90 --out logs/x.log`; the board enumerates as COM3 on this machine); typed lines are forwarded to the board, so `MARK level` etc. can be sent while recording |
-| `tools/att_report.py analyze` | finds steady plateaus, prints static/tilt/180 deg metrics and PASS/FAIL |
+| `tools/att_gui.py` | **recommended**: local web measurement console — big buttons tag each state (`MARK level` / `tilt30` / `level2` / `turn180`), live yaw/pitch/tilt/\|B\|, one click runs the criteria and shows PASS/FAIL. No stopwatch, no waiting for a timed cue |
+| `tools/att_report.py record` | plain serial capture (`--port COM3 --seconds 90 --out logs/x.log`); typed lines are forwarded to the board |
+| `tools/att_report.py analyze` | judges a log: state windows from `MARK`s, static σ/drift, tilt and turn deltas, dip and \|B\| environment checks, PASS/FAIL + exit code |
 | `tools/host_test/mag_fit_test.c` | host-side regression test for the ellipsoid solver (`gcc -O2 -I main tools/host_test/mag_fit_test.c main/mag_fit.c -lm -o mag_fit_test`) |
 | `tools/host_test/make_test_log.py` | builds a synthetic ATT log with known answers (`--bad` for a failing one) to regression-test the analyzer |
 
-`tools/att_report.py record` needs `pyserial`; `analyze` is pure stdlib.
+```
+python tools/att_gui.py                # auto-detects the board, opens http://127.0.0.1:8765/
+python tools/att_gui.py --port COM3 --http-port 8770
+```
+
+Then: ① 水平 → ② 倾斜 30° → ③ 回水平 → ④ 转 180° → 分析判据, pressing a button each
+time the board is settled in that state. `record`/`analyze` need `pyserial`; `analyze`
+alone is pure stdlib.
 
 ## Serial output
 

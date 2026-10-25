@@ -163,26 +163,33 @@ Everything below runs on the PC; the only manual part is moving the board.
    swing, `画 8 字`). Look for
    `校准完成（椭球拟合）：喂入 N 个样本，存 M，拟合用 U（剔除 K） offset=[...] 半径=... 残差=...% 覆盖度=...`
    and `Mag calibration OK: samples=... method=椭球拟合 quality=... radius=...`.
-3. Four criteria in one recording (typing `MARK <label>` while it records is optional,
-   the analyzer does not need it):
+3. Four criteria — use the button console so nothing depends on timing:
+   ```
+   python tools/att_gui.py            # opens http://127.0.0.1:8765/
+   ```
+   Press a button each time the board is **settled** in that state:
+   `① 水平` → `② 倾斜 30°` (prop one edge on a book so the hand is away) → `③ 回水平` →
+   `④ 转 180°` (turn it on a sheet of paper, do not pick it up) → `分析判据`.
+   Each press sends `MARK <label>` immediately; the analyzer uses the 3 s before each
+   mark as that state's window, so the measurement point is the button press, not a
+   stopwatch. The console shows the verdict in the page.
+
+   Command line equivalent (`record` + `analyze`) still works:
    ```
    python tools/att_report.py record --port COM3 --seconds 200 --out logs/criteria.log
+   python tools/att_report.py analyze logs/criteria.log
    ```
-   then: board level and hands off → tilt ~30 deg (prop one edge on a book so the hand
-   is away) → back to level → rotate 180 deg **without changing the board's position**
-   (turn it on a sheet of paper) → hands off.
-4. Judge:
-   ```
-   python tools/att_report.py analyze logs/*.log
-   ```
-   Exit code 0 = all criteria pass.
 
-### How the tool judges (it changed twice for a reason)
+### How the tool judges
 
-- Segmenting by `MARK` alone was not enough: marks cannot be timed well enough, and any
-  recording that contains a reboot breaks the `ATT` millisecond column (it restarts at
-  0). The analyzer now finds steady plateaus from the data (±0.6 s least-squares slope),
-  ignores the 30 s after a reboot, and stitches reboots with a time offset.
+- Time-based protocols are out: telling the operator "tilt at 45 s" produced four
+  unusable runs. Now the operator presses a button (or types `MARK`) **while the board
+  is settled**, and the analyzer takes the 3 s before each mark as that state's window
+  — the mark is the end of the state, and the motion to the next state falls outside.
+  Without marks it falls back to detecting steady plateaus from the data.
+- Any recording that contains a reboot breaks the `ATT` millisecond column (it restarts
+  at 0), so reboots are stitched with a time offset and the 30 s after a reboot are
+  ignored (AHRS settling: yaw moves ~3 deg in the first 15 s after a recalibration).
 - Plateaus whose \|B\| or dip differs from the others are flagged (`!`) as a different
   magnetic environment and excluded — otherwise a magnetic disturbance reads as a
   heading change.

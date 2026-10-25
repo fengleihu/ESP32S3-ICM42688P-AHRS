@@ -24,9 +24,12 @@
 
 判定方式
 --------
-工具不是按 MARK 硬切段来判定的（那样"标记点之后的那段"必然混进动作过程），
-而是先从数据里找出所有**稳定平台**（姿态变化率足够小、持续 ≥2.5 s 的区间），
-用平台均值比较，这样标记点不需要掐得准。
+优先按 `MARK` 判：把每个 MARK 之前的 3 秒当成该状态的测量窗口（人是在摆好之后
+才按的按钮，标记即状态末尾），再比较相邻状态的差值。没有 MARK 时才退回"从数据里
+自动找稳定平台"的做法；静态 σ/漂移 始终用自动识别的长静止段（短窗口估不出漂移）。
+
+工具不是按时间切割数据的（前几轮靠"45 秒后开始倾斜"全废了），测量的时间点完全
+由按钮/MARK 决定。
 
   1. 静态：平台上的 yaw σ（去趋势残差）、yaw 漂移（°/min）、|yaw − 磁航向|
   2. 倾斜：两个相邻平台倾斜差 20~45° 时，yaw 变化应 < 2°
@@ -48,6 +51,7 @@ import math
 import os
 import statistics
 import sys
+from bisect import bisect_left, bisect_right
 
 # ATT 列（0 基）
 C_MS = 1
@@ -408,6 +412,43 @@ def trim_settle(rows, i0, i1, windows):
     return i0, i1
 
 
+def windows_from_marks(rows, marks, window_s):
+    """把每个 MARK 之前的 window_s 秒当成该状态的测量窗口。
+
+    为什么不从 MARK 往后取：人是在"摆好并稳住之后"按下按钮的，标记时刻就是
+    该状态的末尾；标记之后的区间是"开始动"的过程。所以取前不取后。
+    """
+    out = []
+    ts = [r["t"] for r in rows]
+    for t_mark, label in marks:
+        hi = bisect_right(ts, t_mark) - 1
+        lo = bisect_left(ts, t_mark - window_s)
+        if hi - lo < 5 or ts[hi] - ts[lo] < 1.0:
+            continue
+        st = plateau_stats(rows, lo, hi)
+        st["label"] = label
+        out.append(st)
+    return out
+
+
+def print_stats_table(title, stats, dip_med):
+    print(f"\n{title}")
+    head = ("#", "标签", "起点s", "时长s", "roll", "pitch", "yaw", "倾斜°",
+            "σ°", "漂移°/min", "yaw−磁航向°", "dip°", "|B|µT", "|B|起伏%")
+    print(("{:<3}{:<13}{:>8}" + "{:>9}" * 11).format(*head))
+    for k, st in enumerate(stats):
+        print(("{:<3}{:<13}{:>8}" + "{:>9}" * 11).format(
+            k, (st["label"] + ("!" if st.get("env_out") else ""))[:12],
+            fmt(st["t0"], 1), fmt(st["dur"], 1), fmt(st["roll"], 1),
+            fmt(st["pitch"], 1), fmt(st["yaw"], 1), fmt(st["tilt"], 1),
+            fmt(st["sigma"], 3), fmt(st["drift"], 2, True),
+            fmt(st["yaw_minus_hdg"], 2, True), fmt(st["dip"], 1),
+            fmt(st["bmean"], 1), fmt(st["bscale"], 1)))
+    if dip_med is not None and not math.isnan(dip_med):
+        print(f"  dip 是中纬度磁场的不变量，同一地点在不同倾斜下应保持一致；"
+              f"中位数 {dip_med:.1f}°")
+
+
 def analyze_file(path, args):
     rows, marks, highlights, reboot_ts = parse_log(path)
     print("=" * 82)
@@ -437,7 +478,7 @@ def analyze_file(path, args):
     if windows:
         print(f"  重启后的前 {args.settle:.0f} s 视为滤波收敛期，不计入静态指标")
 
-    stats = []
+    plateau_list = []
     skipped = 0
     for a, b in plateaus:
         a2, b2 = trim_settle(rows, a, b, windows)
@@ -446,73 +487,75 @@ def analyze_file(path, args):
             continue
         st = plateau_stats(rows, a2, b2)
         st["label"] = label_for(marks, st["t0"], st["t1"])
-        stats.append(st)
+        plateau_list.append(st)
 
     if skipped:
         print(f"  有 {skipped} 个平台整段落在收敛窗口内，已跳过")
-    if not stats:
-        print("  没有可用的稳定平台")
+
+    # 有 MARK 就用"每个 MARK 之前 state_window 秒"当该状态的窗口（人是在摆好之后
+    # 才按的按钮）；没有 MARK 才退回自动平台识别。
+    state_list = windows_from_marks(rows, marks, args.state_window) if marks else []
+    if state_list:
+        print(f"  按 {len(marks)} 个 MARK 取窗口：每个 MARK 之前 "
+              f"{args.state_window:.1f} s（标记即状态末尾）")
+    else:
+        state_list = plateau_list
+    if not state_list:
+        print("  没有可用的数据窗口")
         return None
 
     # ---- 环境一致性：|B| 或 dip 与中位数差太多，说明这段数据搬了位置/被遮挡 ----
-    bvals = [st["bmean"] for st in stats if st["bmean"] > 1e-6]
-    dipvals = [st["dip"] for st in stats if not math.isnan(st["dip"])]
+    ref = plateau_list or state_list
+    bvals = [st["bmean"] for st in ref if st["bmean"] > 1e-6]
+    dipvals = [st["dip"] for st in ref if not math.isnan(st["dip"])]
     b_med = statistics.median(bvals) if bvals else 0.0
     dip_med = statistics.median(dipvals) if dipvals else 0.0
-    for st in stats:
+    for st in state_list + plateau_list:
         st["env_out"] = False
         if b_med > 1e-6 and abs(st["bmean"] - b_med) / b_med > args.max_b_drift:
             st["env_out"] = True
         if dipvals and abs(st["dip"] - dip_med) > args.max_dip_drift:
             st["env_out"] = True
 
-    print(f"\n== 稳定平台（变化率 ≤{STEADY_RATE_DPS}°/s，长度 ≥{MIN_PLATEAU_S}s）==")
-    head = ("#", "标签", "起点s", "时长s", "roll", "pitch", "yaw", "倾斜°",
-            "σ°", "漂移°/min", "yaw−磁航向°", "dip°", "|B|µT", "|B|起伏%")
-    print(("{:<3}{:<13}{:>8}" + "{:>9}" * 11).format(*head))
-    for k, st in enumerate(stats):
-        print(("{:<3}{:<13}{:>8}" + "{:>9}" * 11).format(
-            k, (st["label"] + ("!" if st["env_out"] else ""))[:12],
-            fmt(st["t0"], 1), fmt(st["dur"], 1), fmt(st["roll"], 1),
-            fmt(st["pitch"], 1), fmt(st["yaw"], 1), fmt(st["tilt"], 1),
-            fmt(st["sigma"], 3), fmt(st["drift"], 2, True),
-            fmt(st["yaw_minus_hdg"], 2, True), fmt(st["dip"], 1),
-            fmt(st["bmean"], 1), fmt(st["bscale"], 1)))
-    print(f"  dip 是中纬度磁场的不变量，同一地点在不同倾斜下应保持一致；"
-          f"中位数 {dip_med:.1f}°")
-    env_bad = [st for st in stats if st["env_out"]]
+    print_stats_table("== 测量状态 ==", state_list, dip_med)
+    if marks and plateau_list:
+        long_plateaus = [st for st in plateau_list if st["dur"] >= 10.0]
+        if long_plateaus:
+            print_stats_table("== 自动识别的长时间静止段（用于 σ / 漂移） ==",
+                              long_plateaus, dip_med)
+
+    env_bad = [st for st in state_list if st["env_out"]]
     if env_bad:
-        print(f"  ! 带 ! 的 {len(env_bad)} 个平台 |B| 或 dip 偏离中位数"
+        print(f"  ! 带 ! 的 {len(env_bad)} 个状态窗口 |B| 或 dip 偏离中位数"
               f"（> {args.max_b_drift * 100:.0f}% / {args.max_dip_drift:.1f}°）："
               f"该段磁场环境与其它段不同（换位置、靠近金属或被手遮挡），"
-              f"不参与判据。dip 展开 = "
-              + ", ".join(f"{st['dip']:.1f}°" for st in stats))
+              f"不参与判据")
 
     checks = []
 
-    # ---- 静态判据：取各平台上最差的（只算足够的时长、环境一致）----
-    static = [st for st in stats
-              if st["dur"] >= 5.0 and st["mag_frac"] > 0.5 and not st["env_out"]]
-    if static:
-        worst_sigma = max(static, key=lambda s: s["sigma"])
-        worst_hdg = max(static, key=lambda s: abs(s["yaw_minus_hdg"])
+    # ---- 静态判据：优先用长静止段（至少 20 s 才能谈漂移）----
+    static_pool = [st for st in (plateau_list or state_list)
+                   if st["dur"] >= 5.0 and st["mag_frac"] > 0.5 and not st["env_out"]]
+    if static_pool:
+        worst_sigma = max(static_pool, key=lambda s: s["sigma"])
+        worst_hdg = max(static_pool, key=lambda s: abs(s["yaw_minus_hdg"])
                         if not math.isnan(s["yaw_minus_hdg"]) else 0.0)
         checks.append(("静态 yaw σ", worst_sigma["sigma"], args.max_sigma, "°",
                        worst_sigma["label"]))
         if not math.isnan(worst_hdg["yaw_minus_hdg"]):
             checks.append(("|yaw−磁航向|", abs(worst_hdg["yaw_minus_hdg"]),
                            args.max_hdg, "°", worst_hdg["label"]))
-        long_static = [st for st in static if st["dur"] >= 20.0]
+        long_static = [st for st in static_pool if st["dur"] >= 20.0]
         if long_static:
             worst_drift = max(long_static, key=lambda s: abs(s["drift"]))
             checks.append(("yaw 漂移", abs(worst_drift["drift"]), args.max_drift,
                            "°/min", worst_drift["label"]))
 
-    # ---- 相邻平台之间的变化 ----
-    if len(stats) >= 2:
+    # ---- 相邻状态之间的变化 ----
+    if len(state_list) >= 2:
         gyro = has_gyro(rows)
         cum = cum_gyro_z(rows) if gyro else None
-        print("\n== 相邻平台变化 ==")
+        print("\n== 相邻状态变化 ==")
         if gyro:
             print("{:<14}->{:<14}{:>8}{:>8}{:>8}{:>8}{:>10}".format(
                 "从", "到", "Δroll", "Δpitch", "Δyaw", "Δ倾斜", "Δyaw陀螺"))
@@ -520,8 +563,8 @@ def analyze_file(path, args):
             print("{:<16}->{:<16}{:>9}{:>9}{:>9}{:>9}".format(
                 "从", "到", "Δroll", "Δpitch", "Δyaw", "Δ倾斜"))
         pairs = []
-        for i in range(len(stats) - 1):
-            a, b = stats[i], stats[i + 1]
+        for i in range(len(state_list) - 1):
+            a, b = state_list[i], state_list[i + 1]
             p = {
                 "a": a["label"], "b": b["label"],
                 "d_roll": b["roll"] - a["roll"],
@@ -613,6 +656,32 @@ def analyze_file(path, args):
     return {"pass": npass, "fail": nfail}
 
 
+def add_analyze_options(parser):
+    """判据阈值。CLI 和 GUI（tools/att_gui.py）共用，避免两边默认值漂移。"""
+    parser.add_argument("--max-sigma", type=float, default=0.5)
+    parser.add_argument("--max-drift", type=float, default=2.0)
+    parser.add_argument("--max-hdg", type=float, default=1.0)
+    parser.add_argument("--max-tilt-yaw", type=float, default=2.0)
+    parser.add_argument("--max-turn-err", type=float, default=5.0)
+    parser.add_argument("--max-mag-gap", type=float, default=2.0,
+                        help="磁航向变化与陀螺积分的允许偏差（超了说明问题在磁侧）")
+    parser.add_argument("--max-b-drift", type=float, default=0.02,
+                        help="各平台 |B| 相对中位数允许偏离多少（比例，默认 2%%）")
+    parser.add_argument("--max-dip-drift", type=float, default=2.0,
+                        help="各平台磁倾角相对中位数允许偏离多少度")
+    parser.add_argument("--settle", type=float, default=30.0,
+                        help="重启后多少秒内的数据不计入静态指标（滤波收敛期）")
+    parser.add_argument("--state-window", type=float, default=3.0,
+                        help="每个 MARK 之前取多少秒作为该状态的测量窗口")
+    return parser
+
+
+def default_analyze_args():
+    p = argparse.ArgumentParser(add_help=False)
+    add_analyze_options(p)
+    return p.parse_args([])
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="采集并判定 ESP32-S3 AHRS 的四项判据",
@@ -630,19 +699,7 @@ def main():
 
     ana = sub.add_parser("analyze", help="分析已记录的日志")
     ana.add_argument("logs", nargs="+")
-    ana.add_argument("--max-sigma", type=float, default=0.5)
-    ana.add_argument("--max-drift", type=float, default=2.0)
-    ana.add_argument("--max-hdg", type=float, default=1.0)
-    ana.add_argument("--max-tilt-yaw", type=float, default=2.0)
-    ana.add_argument("--max-turn-err", type=float, default=5.0)
-    ana.add_argument("--max-mag-gap", type=float, default=2.0,
-                     help="磁航向变化与陀螺积分的允许偏差（超了说明问题在磁侧）")
-    ana.add_argument("--max-b-drift", type=float, default=0.02,
-                     help="各平台 |B| 相对中位数允许偏离多少（比例，默认 2%%）")
-    ana.add_argument("--max-dip-drift", type=float, default=2.0,
-                     help="各平台磁倾角相对中位数允许偏离多少度")
-    ana.add_argument("--settle", type=float, default=30.0,
-                     help="重启后多少秒内的数据不计入静态指标（滤波收敛期）")
+    add_analyze_options(ana)
 
     args = ap.parse_args()
     try:
